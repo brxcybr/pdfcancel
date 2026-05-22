@@ -180,18 +180,20 @@ def _index_file(
 @click.option("-k", "--top-k", type=int, default=10, help="Number of results (default: 10).")
 @click.option("--mode", type=click.Choice(["hybrid", "semantic", "text"]),
               default="hybrid", help="Search mode (default: hybrid).")
-def search(index_name, query, top_k, mode):
+@click.option("--context", is_flag=True,
+              help="Include neighboring chunks for more context.")
+def search(index_name, query, top_k, mode, context):
     """Search across indexed documents.
 
     \b
     Examples:
       pdfcancel search cti "threat intelligence sharing"
-      pdfcancel search cti "ATT&CK framework" --mode semantic
+      pdfcancel search cti "ATT&CK" --mode semantic --context
       pdfcancel search cti "risk management" -k 5
     """
     from pdfcancel.index import search as do_search
 
-    results = do_search(query, index_name, top_k=top_k, mode=mode)
+    results = do_search(query, index_name, top_k=top_k, mode=mode, context=context)
 
     if not results:
         console.print("[yellow]No results found.[/yellow]")
@@ -203,18 +205,41 @@ def search(index_name, query, top_k, mode):
     )
 
     for i, r in enumerate(results, 1):
-        score = f"{r['score']:.3f}"
+        w_score = f"{r.get('weighted_score', r['score']):.3f}"
         method = r.get("method", "")
+        content_type = r.get("content_type", "")
         source = Path(r["source"]).stem
         section = r.get("section", "")
+        doc_title = r.get("doc_title", "")
 
-        console.print(f"[bold cyan]#{i}[/bold cyan] [green]{score}[/green] [{method}]  [dim]{source}[/dim]")
+        # Header line with score, method, content type, source
+        type_tag = f" [{content_type}]" if content_type and content_type != "prose" else ""
+        console.print(
+            f"[bold cyan]#{i}[/bold cyan] [green]{w_score}[/green] "
+            f"[{method}]{type_tag}  [dim]{source}[/dim]"
+        )
+        if doc_title and doc_title != source:
+            console.print(f"   [dim]┃ {doc_title}[/dim]")
         if section:
             console.print(f"   [dim]§ {section}[/dim]")
-        preview = r["text"][:200].replace("\n", " ").strip()
-        if len(r["text"]) > 200:
+
+        # Context before (dimmed)
+        if context and r.get("context_before"):
+            ctx = r["context_before"][:120].replace("\n", " ").strip()
+            console.print(f"   [dim]┌ {ctx}...[/dim]")
+
+        # Main chunk text
+        preview = r["text"][:250].replace("\n", " ").strip()
+        if len(r["text"]) > 250:
             preview += "..."
-        console.print(f"   {preview}\n")
+        console.print(f"   {preview}")
+
+        # Context after (dimmed)
+        if context and r.get("context_after"):
+            ctx = r["context_after"][:120].replace("\n", " ").strip()
+            console.print(f"   [dim]└ {ctx}...[/dim]")
+
+        console.print()
 
 
 # ── Indexes command ───────────────────────────────────────────────────────
