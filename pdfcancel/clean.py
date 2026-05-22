@@ -1,0 +1,233 @@
+"""Post-OCR cleanup for pdfcancel.
+
+Strips page headers, footers, page numbers, download watermarks, and other
+artifacts that Mistral OCR faithfully reproduces from PDF pages. Also rejoins
+sentences that were broken across page boundaries.
+
+This runs automatically after OCR unless --no-clean is passed.
+"""
+
+from __future__ import annotations
+
+import re
+from collections import Counter
+
+
+def clean_markdown(text: str) -> str:
+    """Apply all cleanup passes to OCR markdown output.
+
+    Order matters: detect repeating lines first (before we remove page numbers
+    that help anchor them), then strip page numbers, then rejoin sentences.
+    """
+    text = _strip_download_watermarks(text)
+    text = _strip_repeating_headers_footers(text)
+    text = _strip_bare_page_numbers(text)
+    text = _rejoin_broken_sentences(text)
+    text = _collapse_blank_lines(text)
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Pass 1: Download watermarks
+# ---------------------------------------------------------------------------
+
+# Matches lines like:
+#   "Downloaded by University of South Florida At 14:39 20 October 2015 (PT)"
+#   "Downloaded by [Institutional Name] At HH:MM DD Month YYYY (TZ)"
+_WATERMARK_RE = re.compile(
+    r"^Downloaded by .+$",
+    re.MULTILINE,
+)
+
+
+def _strip_download_watermarks(text: str) -> str:
+    """Remove institutional download watermark lines."""
+    return _WATERMARK_RE.sub("", text)
+
+
+# ---------------------------------------------------------------------------
+# Pass 2: Repeating headers and footers
+# ---------------------------------------------------------------------------
+
+def _strip_repeating_headers_footers(text: str) -> str:
+    """Detect and remove lines that repeat 3+ times and look like page headers/footers.
+
+    Targets patterns like:
+      - "ICS 23,3" / "ICSC23,3" (journal abbreviation + volume)
+      - "Strategic cyber intelligence" (running header matching paper title)
+      - "A. Zibak et al." (author abbreviation)
+      - "Digital Threats: Research and Practice, Vol. 3, No. 4, Article 44. ..."
+      - "AIBDF 2024, December 27-29, 2024, Ganzhou, China"
+      - "Jiyuan Fang et al."
+      - Conference/venue lines that repeat on every page
+
+    Heuristic: any line that appears 3+ times, is ≤120 chars, is NOT a markdown
+    heading, list item, or table row, and is NOT inside a code block, is likely
+    a page header/footer artifact.
+    """
+    lines = text.split("\n")
+    # Count exact occurrences of each line (stripped)
+    line_counts: Counter[str] = Counter()
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            line_counts[stripped] += 1
+
+    # Also count normalized forms (collapse whitespace, strip trailing periods)
+    # so that "AIBDF 2024, Ganzhou, China" and
+    # "AIBDF 2024, December 27-29, 2024, Ganzhou, China" can be grouped
+    # when they share a common prefix.
+    normalized_counts: Counter[str] = Counter()
+    norm_to_originals: dict[str, set[str]] = {}
+    for line_text, count in line_counts.items():
+        # Normalize: take first 20 chars as a prefix key for short-prefix grouping
+        norm = line_text[:20].strip()
+        normalized_counts[norm] += count
+        norm_to_originals.setdefault(norm, set()).add(line_text)
+
+    # Build set of lines to remove
+    artifacts: set[str] = set()
+    for line_text, count in line_counts.items():
+        # Short lines (≤20 chars) are likely journal abbrevs / page markers;
+        # use a lower threshold of 2. Longer lines need 3+ repeats.
+        min_count = 2 if len(line_text) <= 20 else 3
+        # Check if normalized prefix group collectively hits threshold
+        norm = line_text[:20].strip()
+        norm_count = normalized_counts.get(norm, 0)
+        if count < min_count and norm_count < 3:
+            continue
+        # Skip markdown structural elements
+        if line_text.startswith(("#", "-", "*", "|", ">", "```", "![", "[")):
+            continue
+        # Skip lines that are actual content (long prose paragraphs)
+        if len(line_text) > 150:
+            continue
+        # Skip lines that look like reference entries (Author (Year))
+        if re.match(r"^[A-Z][a-z]+.*\(\d{4}\)", line_text):
+            continue
+        # This is likely a repeating header/footer
+        artifacts.add(line_text)
+
+    if not artifacts:
+        return text
+
+    cleaned = []
+    for line in lines:
+        if line.strip() in artifacts:
+            continue
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Pass 3: Bare page numbers
+# ---------------------------------------------------------------------------
+
+# Lines that are just a number (1-4 digits), possibly with whitespace.
+# These are page numbers inserted by OCR between page content.
+_PAGE_NUM_RE = re.compile(r"^\s*\d{1,4}\s*$")
+
+# Lines that are Roman numerals (common in front matter): i, ii, iii, iv, ...
+_ROMAN_NUM_RE = re.compile(r"^\s*[ivxlcdm]+\s*$", re.IGNORECASE)
+
+
+def _strip_bare_page_numbers(text: str) -> str:
+    """Remove lines that are just bare page numbers.
+
+    Careful not to remove numbered list items — those have trailing content
+    or are preceded by other list items. We only remove lines where the
+    ENTIRE line (after stripping) is just a number.
+    """
+    lines = text.split("\n")
+    cleaned = []
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if _PAGE_NUM_RE.match(stripped) or _ROMAN_NUM_RE.match(stripped):
+            # Check context: a page number is typically near a blank line
+            # (before or after). If both neighbors are non-blank content,
+            # it's more likely part of a list or table — keep it.
+            prev_blank = (i == 0) or (not lines[i - 1].strip())
+            next_blank = (i == len(lines) - 1) or (not lines[i + 1].strip())
+            # Also check if neighbors are headings (page numbers often
+            # appear right before/after section breaks)
+            prev_heading = (i > 0) and lines[i - 1].strip().startswith("#")
+            next_heading = (i < len(lines) - 1) and lines[i + 1].strip().startswith("#")
+            if prev_blank or next_blank or prev_heading or next_heading:
+                continue  # Skip this line (it's a page number)
+        cleaned.append(line)
+    return "\n".join(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Pass 4: Rejoin broken sentences
+# ---------------------------------------------------------------------------
+
+def _rejoin_broken_sentences(text: str) -> str:
+    """Rejoin sentences that were split across page boundaries.
+
+    After stripping page artifacts, we may have patterns like:
+
+        ...the analyst defines the parameters of the target event (or kind of
+
+        preceded those events, especially those that were "necessary" conditions...
+
+    The heuristic: if a non-blank line ends WITHOUT sentence-ending punctuation
+    (.!?:) and the next non-blank line starts with a lowercase letter, join them.
+    This is conservative — it won't merge headings, list items, or new paragraphs.
+    """
+    lines = text.split("\n")
+    result: list[str] = []
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+
+        # If this line is blank, a heading, list item, table, or image — just keep it
+        if (
+            not stripped
+            or stripped.startswith(("#", "-", "*", "|", ">", "```", "!["))
+            or stripped.startswith(("(", "["))
+        ):
+            result.append(line)
+            i += 1
+            continue
+
+        # Check if this line looks like it was cut mid-sentence:
+        # - Does NOT end with sentence-ending punctuation
+        # - Next non-blank line starts with lowercase
+        if not re.search(r"[.!?:;]\s*$", stripped):
+            # Find next non-blank line
+            j = i + 1
+            blanks_between = 0
+            while j < len(lines) and not lines[j].strip():
+                blanks_between += 1
+                j += 1
+
+            if (
+                j < len(lines)
+                and blanks_between <= 2  # At most 2 blank lines (page gap)
+                and lines[j].strip()
+                and lines[j].strip()[0].islower()
+                # Don't merge into list items or structural elements
+                and not lines[j].strip().startswith(("-", "*", "|", ">", "```"))
+            ):
+                # Join: current line + space + next line (trimmed)
+                joined = stripped + " " + lines[j].strip()
+                result.append(joined)
+                i = j + 1
+                continue
+
+        result.append(line)
+        i += 1
+
+    return "\n".join(result)
+
+
+# ---------------------------------------------------------------------------
+# Pass 5: Collapse excessive blank lines
+# ---------------------------------------------------------------------------
+
+def _collapse_blank_lines(text: str) -> str:
+    """Reduce runs of 3+ blank lines to 2 (one visual paragraph break)."""
+    return re.sub(r"\n{4,}", "\n\n\n", text)

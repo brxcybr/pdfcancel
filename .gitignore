@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+
+# Environment
+.env
+
+# OS
+.DS_Store
+
+# Node (from chonkiejs experiment)
+node_modules/
+package.json
+package-lock.json
+
+# pdfcancel output artifacts
+*.manifest.json
+
+# Reference PDFs (keep the dir, ignore large binaries)
+ref/*.pdf

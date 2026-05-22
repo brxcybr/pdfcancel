@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pdfcancel"
+version = "0.1.0"
+description = "Cancel your PDFs — convert them to clean markdown with Mistral OCR"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+dependencies = [
+    "chonkie[mistral]",
+    "click>=8.0",
+    "rich>=13.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+chunking = ["chonkie[semantic]"]
+dev = ["pytest", "ruff"]
+
+[project.scripts]
+pdfcancel = "pdfcancel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
