@@ -85,10 +85,23 @@ def main(
 
     # --enhance mode: enhance an existing markdown file
     if enhance_md:
-        console.print("[yellow]Enhance mode is not yet implemented.[/yellow]")
-        console.print(f"  PDF: {path}")
-        console.print(f"  Markdown: {enhance_md}")
-        console.print(f"  Full: {full}")
+        from pdfcancel.enhance import enhance_markdown
+
+        # Resolve output dir for enhance
+        if output_dir:
+            enh_out = Path(output_dir)
+        else:
+            enh_out = Path(enhance_md).parent
+
+        result = enhance_markdown(
+            input_path,
+            Path(enhance_md),
+            settings,
+            output_dir=enh_out,
+            full=full,
+            no_clean=no_clean,
+        )
+        console.print(f"\n[green]Enhanced.[/green] → {result}")
         return
 
     # --full implies --images (need the images to describe them)
