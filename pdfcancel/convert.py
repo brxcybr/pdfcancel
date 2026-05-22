@@ -154,6 +154,7 @@ def convert_single(
             raw_images,
             settings,
             cached_descriptions=cached,
+            markdown_content=markdown_content,
         )
         markdown_content = inject_descriptions(markdown_content, descriptions)
 

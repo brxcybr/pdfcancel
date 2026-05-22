@@ -18,15 +18,67 @@ from pdfcancel.config import Settings
 
 console = Console()
 
-# Prompt for the vision model — tuned for academic/technical documents.
-DESCRIBE_PROMPT = (
-    "You are analyzing an image extracted from an academic or technical document. "
-    "Describe what this image shows in 2-4 sentences. Focus on:\n"
-    "- What type of figure it is (chart, diagram, table, photograph, etc.)\n"
-    "- The key data, relationships, or concepts it conveys\n"
-    "- Any specific values, labels, or trends visible\n"
-    "Be factual and concise. Do not speculate beyond what is visible."
+# Base prompt for the vision model.
+# When surrounding document context is available, it gets prepended to this.
+_BASE_PROMPT = (
+    "Provide a thorough description in 3-6 sentences. Include:\n"
+    "- Figure type (bar chart, line graph, flowchart, network diagram, table, etc.)\n"
+    "- For charts/graphs: axis labels, units, data ranges, specific values for key "
+    "data points, and trends (increasing, decreasing, peaks, outliers)\n"
+    "- For diagrams/flowcharts: the components, their relationships, the flow "
+    "direction, and what process or architecture is being depicted\n"
+    "- For tables: column headers, row count, and notable values\n"
+    "- Any legend, annotations, color coding, or callouts visible\n"
+    "Extract as much specific, quantitative information as possible. "
+    "Use the document's own terminology where applicable. "
+    "This description will replace the image for text-based search and analysis."
 )
+
+# Context window: chars before/after the image reference to extract
+_CONTEXT_WINDOW = 500
+
+
+def _build_prompt(img_id: str, markdown_content: str | None) -> str:
+    """Build a context-enriched prompt for a specific image.
+
+    If markdown_content is provided, extracts the surrounding text around
+    the image reference and includes it so the vision model can ground
+    its description in the document's terminology and framing.
+    """
+    if not markdown_content:
+        return (
+            "You are analyzing an image extracted from an academic or "
+            "technical document. " + _BASE_PROMPT
+        )
+
+    # Find the image reference in the markdown
+    img_stem = Path(img_id).stem
+    pattern = re.compile(re.escape(img_stem), re.IGNORECASE)
+    match = pattern.search(markdown_content)
+
+    if not match:
+        return (
+            "You are analyzing an image extracted from an academic or "
+            "technical document. " + _BASE_PROMPT
+        )
+
+    # Extract surrounding context
+    pos = match.start()
+    start = max(0, pos - _CONTEXT_WINDOW)
+    end = min(len(markdown_content), pos + _CONTEXT_WINDOW)
+    context = markdown_content[start:end].strip()
+
+    # Clean: remove image markdown syntax and collapse whitespace
+    context = re.sub(r"!\[[^\]]*\]\([^)]+\)", "[IMAGE]", context)
+    context = re.sub(r"\n{2,}", "\n", context)
+
+    return (
+        f"You are analyzing a figure from an academic or technical document.\n\n"
+        f"SURROUNDING DOCUMENT CONTEXT:\n"
+        f"\"\"\"\n{context}\n\"\"\"\n\n"
+        f"Using the document context above to inform your terminology, "
+        + _BASE_PROMPT
+    )
 
 
 def describe_images(
@@ -34,6 +86,7 @@ def describe_images(
     settings: Settings,
     *,
     cached_descriptions: dict[str, str] | None = None,
+    markdown_content: str | None = None,
 ) -> dict[str, str]:
     """Send each image to a vision model and return descriptions.
 
@@ -41,6 +94,10 @@ def describe_images(
         images: Mapping of image ID → raw bytes.
         settings: Settings with API key and multimodal_model.
         cached_descriptions: Previously cached {content_hash: description} to skip.
+        markdown_content: The full markdown text, used to extract surrounding
+            context for each image. When provided, the vision model receives
+            the ~500 chars around the image reference so it can ground its
+            description in the document's terminology.
 
     Returns:
         Mapping of image ID → text description.
@@ -69,6 +126,9 @@ def describe_images(
         b64_data = base64.b64encode(img_bytes).decode("ascii")
         data_uri = f"data:{mime};base64,{b64_data}"
 
+        # Build context-enriched prompt
+        prompt = _build_prompt(img_id, markdown_content)
+
         console.print(f"    [dim]Describing image {idx}/{total}: {img_id}[/dim]")
 
         try:
@@ -78,12 +138,12 @@ def describe_images(
                     {
                         "role": "user",
                         "content": [
-                            {"type": "text", "text": DESCRIBE_PROMPT},
+                            {"type": "text", "text": prompt},
                             {"type": "image_url", "image_url": {"url": data_uri}},
                         ],
                     }
                 ],
-                max_tokens=300,
+                max_tokens=400,
             )
             description = response.choices[0].message.content.strip()
             descriptions[img_id] = description
@@ -115,13 +175,15 @@ def inject_descriptions(
             continue
 
         # Find all markdown image references that contain this image ID
-        # Handle both raw OCR refs (img-0.jpeg) and rewritten paths (stem_images/img-0.jpeg)
+        # Handle both raw OCR refs (img-0.jpeg) and rewritten paths
+        # that may contain parentheses, spaces, etc.
         img_stem = Path(img_id).stem
         img_ext = Path(img_id).suffix
 
-        # Pattern: ![anything](anything/img_stem.ext) possibly followed by newlines
+        # Pattern: ![anything](anything containing img_stem.ext)
+        # Use a non-greedy match for the path to handle parens in filenames
         pattern = re.compile(
-            r"(!\[[^\]]*\]\([^)]*"
+            r"(!\[[^\]]*\]\(.+?"
             + re.escape(img_stem)
             + re.escape(img_ext)
             + r"\))"
