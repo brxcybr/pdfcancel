@@ -19,7 +19,7 @@ Tools like `pdftotext` flatten PDFs into unstructured strings, losing all docume
 ## Install
 
 ```bash
-git clone <repo-url> && cd pdfcancel
+git clone https://github.com/brxcybr/pdfcancel.git && cd pdfcancel
 
 # Create a Python 3.12 venv (required — Python 3.14 not yet supported by deps)
 python3.12 -m venv .venv
