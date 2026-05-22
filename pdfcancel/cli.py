@@ -44,6 +44,14 @@ def main(ctx):
         click.echo(ctx.get_help())
 
 
+# Register plugins
+try:
+    from pdfcancel.plugins.zotero import register as _register_zotero
+    _register_zotero(main)
+except ImportError:
+    pass  # Zotero plugin deps not installed
+
+
 # ── Default command: cancel ───────────────────────────────────────────────────
 
 @main.command(hidden=True)
