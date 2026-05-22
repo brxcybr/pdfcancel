@@ -99,6 +99,92 @@ def _classify_content(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Document-level metadata extraction
+# ---------------------------------------------------------------------------
+
+def _extract_doc_metadata(text: str, source_file: str) -> dict[str, str]:
+    """Extract document-level metadata from the markdown content.
+
+    Checks for YAML frontmatter first (injected by Zotero plugin),
+    then falls back to heuristic extraction from the first ~2000 chars.
+
+    Returns a dict with keys: doc_title, doc_author, doc_year, doc_doi.
+    All values are strings; empty string if not found.
+    """
+    meta: dict[str, str] = {
+        "doc_title": "",
+        "doc_author": "",
+        "doc_year": "",
+        "doc_doi": "",
+    }
+
+    # Try YAML frontmatter first (from Zotero sync)
+    if text.startswith("---\n"):
+        end = text.find("\n---", 4)
+        if end != -1:
+            fm = text[4:end]
+            for line in fm.split("\n"):
+                if line.startswith("title:"):
+                    meta["doc_title"] = line.split(":", 1)[1].strip().strip('"')
+                elif line.startswith("authors:"):
+                    raw = line.split(":", 1)[1].strip().strip("[]")
+                    # Take first author's last name
+                    first = raw.split(",")[0].strip()
+                    meta["doc_author"] = first
+                elif line.startswith("year:"):
+                    meta["doc_year"] = line.split(":", 1)[1].strip().strip('"')
+                elif line.startswith("doi:"):
+                    meta["doc_doi"] = line.split(":", 1)[1].strip().strip('"')
+            if meta["doc_title"]:
+                return meta
+
+    # Heuristic: extract from first ~2000 chars of markdown
+    head = text[:2000]
+
+    # Title: first H1 heading
+    title_match = re.search(r"^# (.+)$", head, re.MULTILINE)
+    if title_match:
+        meta["doc_title"] = title_match.group(1).strip()
+
+    # Author: lines between title and abstract that look like names
+    # (short lines with capitalized words, no markdown syntax)
+    if title_match:
+        after_title = head[title_match.end():]
+        for line in after_title.split("\n")[:10]:
+            line = line.strip()
+            if not line or line.startswith(("#", "!", "|", "-", "*", ">")):
+                continue
+            # Looks like a name: short, capitalized, no special chars
+            if len(line) < 60 and re.match(r"^[A-Z][a-z]+ ", line):
+                meta["doc_author"] = line.split(",")[0].split(" and ")[0].strip()
+                break
+
+    # Year: look for 4-digit year in common patterns
+    year_match = re.search(
+        r"(?:(?:19|20)\d{2})",
+        head[:500],
+    )
+    if year_match:
+        meta["doc_year"] = year_match.group(0)
+
+    # DOI: look for DOI pattern
+    doi_match = re.search(r"10\.\d{4,}/[^\s]+", head)
+    if doi_match:
+        meta["doc_doi"] = doi_match.group(0).rstrip(".),")
+
+    # Fallback title from source filename (Author - Year - Title.pdf)
+    if not meta["doc_title"]:
+        stem = Path(source_file).stem
+        parts = stem.split(" - ")
+        if len(parts) >= 3:
+            meta["doc_title"] = parts[-1].strip()
+            meta["doc_author"] = meta["doc_author"] or parts[0].strip()
+            meta["doc_year"] = meta["doc_year"] or parts[1].strip()
+
+    return meta
+
+
+# ---------------------------------------------------------------------------
 # Main chunking entry point
 # ---------------------------------------------------------------------------
 
@@ -112,7 +198,8 @@ def chunk_markdown(
     """Split markdown into chunks with metadata.
 
     Figure blocks (image + description + caption) are kept atomic — they
-    will never be split across chunk boundaries.
+    will never be split across chunk boundaries. Each chunk receives
+    document-level metadata (title, author, year, DOI) for filtered search.
 
     Args:
         markdown_content: The cleaned markdown text.
@@ -123,6 +210,9 @@ def chunk_markdown(
     Returns:
         List of chunk dicts with "text", "metadata" keys.
     """
+    # Extract document-level metadata once
+    doc_meta = _extract_doc_metadata(markdown_content, source_file)
+
     # Phase 1: Protect figure blocks from splitting
     protected_text, figure_blocks = _protect_figure_blocks(markdown_content)
 
@@ -139,8 +229,6 @@ def chunk_markdown(
         text = _restore_figure_blocks(chunk.text, figure_blocks)
 
         # Map back to original position for section lookup
-        # Use the chunk's start position in the protected text to find
-        # the approximate section in the original
         section = _section_at_offset(heading_index, chunk.start_index)
 
         # Classify content type
@@ -157,6 +245,7 @@ def chunk_markdown(
                 "token_count": chunk.token_count,
                 "start_index": chunk.start_index,
                 "end_index": chunk.end_index,
+                **doc_meta,
             },
         })
 
