@@ -16,15 +16,117 @@ from collections import Counter
 def clean_markdown(text: str) -> str:
     """Apply all cleanup passes to OCR markdown output.
 
-    Order matters: detect repeating lines first (before we remove page numbers
-    that help anchor them), then strip page numbers, then rejoin sentences.
+    Order matters: classification banners first (before repeating-header
+    detection removes them without preserving the marking), then the rest.
     """
+    text = _handle_classification_markings(text)
     text = _strip_download_watermarks(text)
     text = _strip_repeating_headers_footers(text)
     text = _strip_bare_page_numbers(text)
     text = _rejoin_broken_sentences(text)
     text = _collapse_blank_lines(text)
     return text
+
+
+# ---------------------------------------------------------------------------
+# Pass 0: Classification markings
+# ---------------------------------------------------------------------------
+
+# Classification banner patterns (standalone lines at top/bottom of pages).
+# These are the marking levels from DoD/IC marking standards.
+_CLASSIFICATION_BANNERS = re.compile(
+    r"^\s*"
+    r"(?:"
+    r"UNCLASSIFIED(?:\s*//\s*(?:FOUO|FOR OFFICIAL USE ONLY|CUI|NOFORN|REL TO|LIMDIS)[\w\s/,]*)?"
+    r"|CUI"
+    r"|CONTROLLED UNCLASSIFIED INFORMATION"
+    r"|FOUO"
+    r"|FOR OFFICIAL USE ONLY"
+    r"|CONFIDENTIAL(?:\s*//\s*[\w\s/,]*)?"
+    r"|SECRET(?:\s*//\s*(?:NOFORN|REL TO|LIMDIS|ORCON)[\w\s/,]*)?"
+    r"|TOP SECRET(?:\s*//\s*(?:SCI|NOFORN|SI|TK|HCS|ORCON)[\w\s/,]*)?"
+    r")\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# "Page N of M" patterns common in government documents.
+_PAGE_N_OF_M_RE = re.compile(
+    r"^\s*Page\s+\d+\s+of\s+\d+\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _handle_classification_markings(text: str) -> str:
+    """Detect classification banner markings, strip per-page repeats, and
+    consolidate into a single notice at the top of the document.
+
+    Government/military documents typically have classification banners at the
+    top and bottom of every page (e.g., "CUI", "UNCLASSIFIED//FOUO",
+    "SECRET//NOFORN"). Portion markings like "(U)" or "(CUI)" at the start
+    of paragraphs are LEFT IN PLACE — they are content-level markers.
+
+    This pass:
+    1. Finds all classification banner lines
+    2. Determines the highest classification level present
+    3. Strips all banner lines from the body
+    4. Strips "Page N of M" lines
+    5. Inserts a single classification notice at the top
+    """
+    # Find all banner matches
+    banners = _CLASSIFICATION_BANNERS.findall(text)
+    if not banners:
+        # Still strip "Page N of M" even if no classification banners
+        text = _PAGE_N_OF_M_RE.sub("", text)
+        return text
+
+    # Determine the highest classification from the banners found
+    classification = _determine_classification(banners)
+
+    # Strip all banner lines from the body
+    text = _CLASSIFICATION_BANNERS.sub("", text)
+
+    # Strip "Page N of M" lines
+    text = _PAGE_N_OF_M_RE.sub("", text)
+
+    # Insert classification notice at the top of the document
+    notice = f"> **Classification:** {classification}\n"
+    text = notice + "\n" + text.lstrip("\n")
+
+    return text
+
+
+def _determine_classification(banners: list[str]) -> str:
+    """Return the highest classification level found in the banner lines.
+
+    Hierarchy: TOP SECRET > SECRET > CONFIDENTIAL > CUI/FOUO > UNCLASSIFIED
+    Returns the full marking string of the highest level found.
+    """
+    # Normalize and deduplicate
+    normalized = set()
+    for b in banners:
+        normalized.add(b.strip().upper())
+
+    # Check from highest to lowest
+    for marking in sorted(normalized, key=_classification_rank, reverse=True):
+        return marking  # Return the highest-ranked one
+
+    return "UNCLASSIFIED"
+
+
+def _classification_rank(marking: str) -> int:
+    """Return a numeric rank for sorting classification levels."""
+    m = marking.upper()
+    if m.startswith("TOP SECRET"):
+        return 5
+    if m.startswith("SECRET"):
+        return 4
+    if m.startswith("CONFIDENTIAL"):
+        return 3
+    if any(m.startswith(x) for x in ("CUI", "CONTROLLED", "FOUO", "FOR OFFICIAL")):
+        return 2
+    if m.startswith("UNCLASSIFIED"):
+        return 1
+    return 0
 
 
 # ---------------------------------------------------------------------------
