@@ -105,6 +105,7 @@ def main(
             plaintext=plaintext,
             extract_images=images,
             embed_images=embed_images,
+            full=full,
             force=force,
             no_clean=no_clean,
         )
@@ -117,6 +118,7 @@ def main(
             plaintext=plaintext,
             extract_images=images,
             embed_images=embed_images,
+            full=full,
             force=force,
             no_clean=no_clean,
             verbose=verbose,

@@ -82,6 +82,7 @@ def convert_single(
     plaintext: bool = False,
     extract_images: bool = False,
     embed_images: bool = False,
+    full: bool = False,
     force: bool = False,
     no_clean: bool = False,
 ) -> Path:
@@ -107,28 +108,61 @@ def convert_single(
             console.print(f"  [dim]Skipping {pdf_path.name} (unchanged)[/dim]")
             return existing
 
-    # Run Mistral OCR via Chonkie
-    from chonkie import MistralOCR
-
-    ocr = MistralOCR(model=settings.ocr_model, api_key=settings.mistral_api_key)
-
     console.print(f"  [bold]Cancelling[/bold] {pdf_path.name} ...")
-    doc = ocr.process(str(pdf_path))
-    markdown_content = doc.content
 
-    # Handle images
-    markdown_content = process_images(
-        markdown_content,
-        doc=doc,
-        stem=stem,
-        output_dir=output_dir,
-        extract=extract_images,
-        embed=embed_images,
-    )
+    if full:
+        # Use mistralai SDK directly to get both text and image base64 data
+        from pdfcancel.images import ocr_with_images
+        markdown_content, raw_images = ocr_with_images(pdf_path, settings)
+    else:
+        # Standard path: Chonkie MistralOCR (no image data)
+        from chonkie import MistralOCR
+        ocr = MistralOCR(model=settings.ocr_model, api_key=settings.mistral_api_key)
+        doc = ocr.process(str(pdf_path))
+        markdown_content = doc.content
+        raw_images = {}
+
+    # Handle images (extract to disk / embed as base64)
+    if extract_images or embed_images:
+        from pdfcancel.images import process_images_from_raw
+        markdown_content = process_images_from_raw(
+            markdown_content,
+            images=raw_images,
+            stem=stem,
+            output_dir=output_dir,
+            extract=extract_images,
+            embed=embed_images,
+        )
 
     # Post-OCR cleanup: strip page artifacts, rejoin broken sentences
     if not no_clean:
         markdown_content = clean_markdown(markdown_content)
+
+    # --full: multimodal image descriptions
+    if full and raw_images:
+        from pdfcancel.multimodal import describe_images, inject_descriptions
+
+        console.print(f"  [bold]Describing[/bold] {len(raw_images)} image(s) ...")
+
+        # Load cached descriptions from manifest
+        cached = manifest.get(stem, {}).get("image_descriptions", {})
+
+        descriptions = describe_images(
+            raw_images,
+            settings,
+            cached_descriptions=cached,
+        )
+        markdown_content = inject_descriptions(markdown_content, descriptions)
+
+        # Build cache for manifest: {content_hash: description}
+        import hashlib as _hl
+        desc_cache = {}
+        for img_id, img_bytes in raw_images.items():
+            h = _hl.sha256(img_bytes).hexdigest()[:16]
+            if img_id in descriptions:
+                desc_cache[h] = descriptions[img_id]
+    else:
+        desc_cache = {}
 
     # Write output
     if plaintext:
@@ -139,12 +173,15 @@ def convert_single(
         out_path.write_text(markdown_content)
 
     # Update manifest
-    manifest[stem] = {
+    manifest_entry = {
         "hash": pdf_hash,
         "source": str(pdf_path),
         "output": str(out_path),
         "converted_at": datetime.now(timezone.utc).isoformat(),
     }
+    if desc_cache:
+        manifest_entry["image_descriptions"] = desc_cache
+    manifest[stem] = manifest_entry
     save_manifest(output_dir, manifest)
 
     return out_path
@@ -158,6 +195,7 @@ def convert_batch(
     plaintext: bool = False,
     extract_images: bool = False,
     embed_images: bool = False,
+    full: bool = False,
     force: bool = False,
     no_clean: bool = False,
     verbose: bool = False,
@@ -179,6 +217,7 @@ def convert_batch(
                 plaintext=plaintext,
                 extract_images=extract_images,
                 embed_images=embed_images,
+                full=full,
                 force=force,
                 no_clean=no_clean,
             )

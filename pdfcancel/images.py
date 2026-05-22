@@ -7,6 +7,74 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pdfcancel.config import Settings
+
+
+def ocr_with_images(pdf_path: Path, settings: Settings) -> tuple[str, dict[str, bytes]]:
+    """Run Mistral OCR directly via the SDK with include_image_base64=True.
+
+    Returns (markdown_content, {image_id: raw_bytes}).
+    Used by --full mode to get both text and image data in a single API call.
+    """
+    from mistralai.client import Mistral
+
+    client = Mistral(api_key=settings.require_api_key())
+
+    # Upload PDF to Mistral for OCR
+    with open(pdf_path, "rb") as f:
+        uploaded = client.files.upload(
+            file={"file_name": pdf_path.name, "content": f.read()},
+            purpose="ocr",
+        )
+    signed_url = client.files.get_signed_url(file_id=uploaded.id, expiry=1)
+
+    # Run OCR with image extraction
+    from mistralai.client.models import DocumentURLChunk
+    response = client.ocr.process(
+        document=DocumentURLChunk(document_url=signed_url.url),
+        model=settings.ocr_model,
+        include_image_base64=True,
+    )
+
+    # Assemble markdown from all pages
+    markdown_parts = []
+    images: dict[str, bytes] = {}
+
+    for page in response.pages:
+        markdown_parts.append(page.markdown)
+        for img in page.images:
+            if img.id and img.image_base64:
+                b64_data = img.image_base64
+                # Strip data URI prefix if present
+                if "," in b64_data:
+                    b64_data = b64_data.split(",", 1)[1]
+                try:
+                    images[img.id] = base64.b64decode(b64_data)
+                except Exception:
+                    pass
+
+    markdown_content = "\n\n".join(markdown_parts)
+    return markdown_content, images
+
+
+def process_images_from_raw(
+    markdown_content: str,
+    *,
+    images: dict[str, bytes],
+    stem: str,
+    output_dir: Path,
+    extract: bool = False,
+    embed: bool = False,
+) -> str:
+    """Process images from raw bytes (used when we have image data from direct SDK call)."""
+    if not images or (not extract and not embed):
+        return markdown_content
+    if extract:
+        return _extract_images(markdown_content, images, stem, output_dir)
+    if embed:
+        return _embed_images(markdown_content, images)
+    return markdown_content
+
 
 def process_images(
     markdown_content: str,
