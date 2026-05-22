@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 chunking = ["chonkie[semantic]"]
+indexing = ["model2vec", "numpy"]
 dev = ["pytest", "ruff"]
 
 [project.scripts]
