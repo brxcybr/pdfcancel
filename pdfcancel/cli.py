@@ -36,6 +36,11 @@ console = Console()
 @click.option("--enhance", "enhance_md", type=click.Path(exists=True), default=None,
               help="Enhance an existing markdown file instead of generating from scratch.")
 @click.option("--model", default=None, help="OCR model override (default: mistral-ocr-latest).")
+@click.option("--chunks", is_flag=True, help="Also produce chunked JSONL output for RAG/LLM.")
+@click.option("--chunk-size", type=int, default=1024,
+              help="Max tokens per chunk (default: 1024). Used with --chunks.")
+@click.option("--chunker", type=click.Choice(["recursive", "semantic", "sentence"]),
+              default="recursive", help="Chunking strategy (default: recursive).")
 @click.option("--no-clean", is_flag=True, help="Skip post-OCR cleanup (keep raw OCR output).")
 @click.option("--force", is_flag=True, help="Re-process even if already converted.")
 @click.option("--verbose", is_flag=True, help="Show detailed progress.")
@@ -54,6 +59,9 @@ def main(
     full_model,
     enhance_md,
     model,
+    chunks,
+    chunk_size,
+    chunker,
     no_clean,
     force,
     verbose,
@@ -108,6 +116,9 @@ def main(
             full=full,
             force=force,
             no_clean=no_clean,
+            produce_chunks=chunks,
+            chunk_size=chunk_size,
+            chunker_type=chunker,
         )
         console.print(f"\n[green]Cancelled.[/green] → {result}")
     else:
@@ -121,6 +132,9 @@ def main(
             full=full,
             force=force,
             no_clean=no_clean,
+            produce_chunks=chunks,
+            chunk_size=chunk_size,
+            chunker_type=chunker,
             verbose=verbose,
         )
         console.print(f"\n[green]Cancelled {len(results)} PDF(s).[/green]")

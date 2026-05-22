@@ -85,6 +85,9 @@ def convert_single(
     full: bool = False,
     force: bool = False,
     no_clean: bool = False,
+    produce_chunks: bool = False,
+    chunk_size: int = 1024,
+    chunker_type: str = "recursive",
 ) -> Path:
     """Convert a single PDF to markdown (or plaintext).
 
@@ -164,6 +167,21 @@ def convert_single(
     else:
         desc_cache = {}
 
+    # --chunks: produce JSONL chunked output
+    if produce_chunks:
+        from pdfcancel.chunks import chunk_markdown, write_chunks_jsonl
+
+        console.print(f"  [bold]Chunking[/bold] ({chunker_type}, size={chunk_size}) ...")
+        chunks = chunk_markdown(
+            markdown_content,
+            source_file=pdf_path.name,
+            chunk_size=chunk_size,
+            chunker_type=chunker_type,
+        )
+        chunks_path = output_dir / f"{stem}_chunks.jsonl"
+        write_chunks_jsonl(chunks, chunks_path)
+        console.print(f"    {len(chunks)} chunks → {chunks_path.name}")
+
     # Write output
     if plaintext:
         out_path = output_dir / f"{stem}.txt"
@@ -198,6 +216,9 @@ def convert_batch(
     full: bool = False,
     force: bool = False,
     no_clean: bool = False,
+    produce_chunks: bool = False,
+    chunk_size: int = 1024,
+    chunker_type: str = "recursive",
     verbose: bool = False,
 ) -> list[Path]:
     """Convert multiple PDFs, with progress display."""
@@ -220,6 +241,9 @@ def convert_batch(
                 full=full,
                 force=force,
                 no_clean=no_clean,
+                produce_chunks=produce_chunks,
+                chunk_size=chunk_size,
+                chunker_type=chunker_type,
             )
             results.append(out)
             if verbose:
