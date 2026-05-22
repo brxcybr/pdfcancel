@@ -13,7 +13,6 @@ Tools like `pdftotext` flatten PDFs into unstructured strings, losing all docume
 - Lists, blockquotes, and code blocks maintained
 - Mathematical equations in LaTeX format
 - AI-generated descriptions of charts, figures, and diagrams
-- Classification marking handling (CUI, SECRET, UNCLASSIFIED)
 - Automatic removal of page headers, footers, watermarks, and page numbers
 - Multilingual support (99%+ accuracy across 25+ languages)
 
@@ -140,13 +139,13 @@ Build per-project search indexes with hybrid text + semantic search:
 
 ```bash
 # Cancel + add to index
-pdfcancel paper.pdf --index cti
-pdfcancel ./papers/ --index cti --verbose
+pdfcancel paper.pdf --index collection
+pdfcancel ./papers/ --index collection --verbose
 
 # Search
-pdfcancel search cti "threat intelligence sharing"
-pdfcancel search cti "adversary TTPs" --mode semantic
-pdfcancel search cti "risk management" --context -k 5
+pdfcancel search collection "DevSecOps"
+pdfcancel search collection "Agentic AI" --mode semantic
+pdfcancel search collection "AI Governance" --context -k 5
 
 # List indexes
 pdfcancel indexes
@@ -165,11 +164,11 @@ Sync entire Zotero collections to markdown with citation metadata:
 ```bash
 # List groups and collections
 pdfcancel zotero list
-pdfcancel zotero list --group MI-CTI
+pdfcancel zotero list --group ORG
 
 # Sync a collection
-pdfcancel zotero sync CTI -o ./output/ --group MI-CTI
-pdfcancel zotero sync CTI -o ./output/ --group MI-CTI --index cti
+pdfcancel zotero sync COLLECTION -o ./output/ --group ORG
+pdfcancel zotero sync COLLECTION -o ./output/ --group ORG --index collection
 ```
 
 Each synced file gets YAML frontmatter with Zotero metadata:
@@ -185,14 +184,6 @@ zotero_key: "I9C6QY75"
 ```
 
 Requires Zotero 7+ with: Settings > Advanced > "Allow other applications to communicate with Zotero".
-
-### Classification Markings
-
-Government/military documents with classification banners (CUI, SECRET, etc.) are handled automatically:
-- Per-page banners stripped from body
-- Single classification notice at document top: `> **Classification:** CUI`
-- Portion markings like `(U)` preserved inline
-- `Page N of M` page numbers removed
 
 ### Post-OCR Cleanup
 
@@ -288,7 +279,6 @@ pdfcancel/
 - [x] **Phase 4:** `--chunks` — figure-aware RAG chunking with content classification
 - [x] **Phase 5:** `--index` + `search` — hybrid search with weighted scoring and context expansion
 - [x] **Phase 6:** `zotero` — Zotero library sync with citation frontmatter
-- [x] Classification marking handling (CUI, SECRET, UNCLASSIFIED)
 - [x] Post-OCR cleanup (watermarks, headers, page numbers, broken sentences)
 - [x] Document-level metadata propagation to all chunks
 - [ ] Vega-Lite chart spec extraction from figures
