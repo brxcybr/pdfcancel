@@ -17,7 +17,12 @@ from rich.table import Table
 
 from pdfcancel import __version__
 from pdfcancel.config import Settings
-from pdfcancel.convert import convert_batch, convert_single, gather_pdfs
+from pdfcancel.convert import (
+    convert_batch,
+    convert_batch_pipeline,
+    convert_single,
+    gather_pdfs,
+)
 
 console = Console()
 
@@ -75,13 +80,19 @@ except ImportError:
               default="recursive", help="Chunking strategy (default: recursive).")
 @click.option("--index", "index_name", default=None,
               help="Add to a named search index (implies --chunks).")
+@click.option("--index-path", type=click.Path(), default=None,
+              help="Custom path for the index database (e.g. ./cti.db).")
 @click.option("--no-clean", is_flag=True, help="Skip post-OCR cleanup.")
 @click.option("--force", is_flag=True, help="Re-process even if already converted.")
 @click.option("--verbose", is_flag=True, help="Show detailed progress.")
+@click.option("--batch", is_flag=True,
+              help="Use Mistral Batch API for 50%% cost savings on directory runs.")
+@click.option("--exclude", multiple=True,
+              help="Exclude PDFs whose filename contains this text (repeatable).")
 def cancel(
     path, output_dir, images, embed_images, plaintext, full, full_model,
-    enhance_md, model, chunks, chunk_size, chunker, index_name,
-    no_clean, force, verbose,
+    enhance_md, model, chunks, chunk_size, chunker, index_name, index_path,
+    no_clean, force, verbose, batch, exclude,
 ):
     """Cancel PDFs — convert to clean markdown.
 
@@ -100,9 +111,12 @@ def cancel(
     if full_model:
         settings.multimodal_model = full_model
 
-    # --index implies --chunks
+    # --index implies --chunks; set custom index path if provided
     if index_name:
         chunks = True
+    if index_path:
+        from pdfcancel.index import set_index_path
+        set_index_path(Path(index_path))
 
     # --enhance mode
     if enhance_md:
@@ -127,9 +141,27 @@ def cancel(
     else:
         out = input_path.parent
 
-    pdf_paths = gather_pdfs(input_path)
+    pdf_paths = gather_pdfs(input_path, exclude=list(exclude) if exclude else None)
 
-    if len(pdf_paths) == 1:
+    if batch and len(pdf_paths) > 1:
+        # Batch pipeline: upload all → batch OCR → batch vision → local post-process
+        results = convert_batch_pipeline(
+            pdf_paths, settings,
+            output_dir=out, plaintext=plaintext, extract_images=images,
+            embed_images=embed_images, full=full, force=force,
+            no_clean=no_clean, produce_chunks=chunks,
+            chunk_size=chunk_size, chunker_type=chunker, verbose=verbose,
+        )
+        if index_name:
+            for res_path in results:
+                # Find matching PDF by stem
+                pdf_match = next(
+                    (p for p in pdf_paths if p.stem == res_path.stem), None
+                )
+                if pdf_match:
+                    _index_file(res_path, pdf_match.name, index_name, chunk_size, chunker)
+        console.print(f"\n[green]Cancelled {len(results)} PDF(s) via batch.[/green]")
+    elif len(pdf_paths) == 1:
         result = convert_single(
             pdf_paths[0], settings,
             output_dir=out, plaintext=plaintext, extract_images=images,
@@ -182,7 +214,9 @@ def _index_file(
               default="hybrid", help="Search mode (default: hybrid).")
 @click.option("--context", is_flag=True,
               help="Include neighboring chunks for more context.")
-def search(index_name, query, top_k, mode, context):
+@click.option("--index-path", type=click.Path(), default=None,
+              help="Custom path for the index database.")
+def search(index_name, query, top_k, mode, context, index_path):
     """Search across indexed documents.
 
     \b
@@ -191,7 +225,10 @@ def search(index_name, query, top_k, mode, context):
       pdfcancel search cti "ATT&CK" --mode semantic --context
       pdfcancel search cti "risk management" -k 5
     """
-    from pdfcancel.index import search as do_search
+    from pdfcancel.index import search as do_search, set_index_path
+
+    if index_path:
+        set_index_path(Path(index_path))
 
     results = do_search(query, index_name, top_k=top_k, mode=mode, context=context)
 

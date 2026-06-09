@@ -22,8 +22,26 @@ console = Console()
 INDEX_DIR = Path.home() / ".pdfcancel" / "indexes"
 
 
+# Custom path override — set by CLI --index-path flag
+_custom_index_path: Path | None = None
+
+
+def set_index_path(path: Path | None) -> None:
+    """Override the default index location."""
+    global _custom_index_path
+    _custom_index_path = path
+
+
 def _index_path(name: str) -> Path:
     """Return the path to a named index database."""
+    if _custom_index_path:
+        # Custom path: use it directly (name is ignored if path ends in .db)
+        p = Path(_custom_index_path)
+        if p.suffix == ".db":
+            p.parent.mkdir(parents=True, exist_ok=True)
+            return p
+        p.mkdir(parents=True, exist_ok=True)
+        return p / f"{name}.db"
     INDEX_DIR.mkdir(parents=True, exist_ok=True)
     return INDEX_DIR / f"{name}.db"
 

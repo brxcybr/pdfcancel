@@ -31,7 +31,13 @@ _BASE_PROMPT = (
     "- Any legend, annotations, color coding, or callouts visible\n"
     "Extract as much specific, quantitative information as possible. "
     "Use the document's own terminology where applicable. "
-    "This description will replace the image for text-based search and analysis."
+    "This description will replace the image for text-based search and analysis.\n\n"
+    "If the figure contains structured data that can be represented as a table "
+    "(e.g. bar charts, pie charts, comparison matrices, statistical tables, "
+    "timelines with dates), append a section starting with DATA: on a new line, "
+    "followed by a markdown table extracting the key data points. Use ~ to mark "
+    "approximate/estimated values read from the chart. If the figure has no "
+    "extractable tabular data, omit the DATA: section entirely."
 )
 
 # Context window: chars before/after the image reference to extract
@@ -166,6 +172,13 @@ def inject_descriptions(
     Into:
         ![alt](path/to/img-0.jpeg)
         > **Figure description:** This bar chart shows...
+        >
+        > | Column A | Column B |
+        > |----------|----------|
+        > | val1     | val2     |
+
+    If the description contains a DATA: section, the markdown table is
+    rendered as a blockquote below the prose description for searchability.
 
     Only injects if a description exists for the image ID and the image
     doesn't already have a description block below it.
@@ -173,6 +186,9 @@ def inject_descriptions(
     for img_id, description in descriptions.items():
         if not description or description.startswith("[Image description unavailable"):
             continue
+
+        # Split description and optional structured data
+        prose, data_table = _split_description_data(description)
 
         # Find all markdown image references that contain this image ID
         # Handle both raw OCR refs (img-0.jpeg) and rewritten paths
@@ -190,16 +206,33 @@ def inject_descriptions(
             + r"(\n*)"
         )
 
-        def _insert_desc(match: re.Match) -> str:
+        # Build the injection block
+        block = f"> **Figure description:** {prose}"
+        if data_table:
+            # Render data table as blockquoted markdown
+            block += "\n>\n" + "\n".join(
+                f"> {line}" for line in data_table.strip().splitlines()
+            )
+
+        def _insert_desc(match: re.Match, _block: str = block) -> str:
             img_ref = match.group(1)
-            trailing = match.group(2)
-            # Don't double-insert if description block already exists
-            # Check if the text after this match already has a blockquote
-            return f"{img_ref}\n> **Figure description:** {description}\n"
+            return f"{img_ref}\n{_block}\n"
 
         markdown_content = pattern.sub(_insert_desc, markdown_content)
 
     return markdown_content
+
+
+def _split_description_data(description: str) -> tuple[str, str]:
+    """Split a vision model response into prose description and optional DATA table.
+
+    Returns (prose, data_table) where data_table may be empty string.
+    """
+    # Look for DATA: marker (case-insensitive, possibly preceded by newlines)
+    parts = re.split(r"\n\s*DATA:\s*\n", description, maxsplit=1, flags=re.IGNORECASE)
+    prose = parts[0].strip()
+    data_table = parts[1].strip() if len(parts) > 1 else ""
+    return prose, data_table
 
 
 def image_content_hashes(images: dict[str, bytes]) -> dict[str, str]:
@@ -208,3 +241,48 @@ def image_content_hashes(images: dict[str, bytes]) -> dict[str, str]:
         hashlib.sha256(img_bytes).hexdigest()[:16]: img_id
         for img_id, img_bytes in images.items()
     }
+
+
+def build_batch_vision_requests(
+    images: dict[str, bytes],
+    settings: Settings,
+    *,
+    pdf_stem: str,
+    cached_descriptions: dict[str, str] | None = None,
+    markdown_content: str | None = None,
+) -> tuple[list[dict], dict[str, str]]:
+    """Build batch vision request dicts for batch_vision().
+
+    Returns:
+        (requests, cached_hits) where:
+        - requests: list of dicts with custom_id, prompt, data_uri
+        - cached_hits: {img_id: description} for images with cached descriptions
+    """
+    cached = cached_descriptions or {}
+    requests = []
+    cached_hits: dict[str, str] = {}
+
+    for img_id, img_bytes in images.items():
+        content_hash = hashlib.sha256(img_bytes).hexdigest()[:16]
+
+        # Use cached description if available
+        if content_hash in cached:
+            cached_hits[img_id] = cached[content_hash]
+            continue
+
+        # Build data URI
+        ext = Path(img_id).suffix.lstrip(".").lower() or "png"
+        mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
+        b64_data = base64.b64encode(img_bytes).decode("ascii")
+        data_uri = f"data:{mime};base64,{b64_data}"
+
+        # Build context-enriched prompt
+        prompt = _build_prompt(img_id, markdown_content)
+
+        requests.append({
+            "custom_id": f"{pdf_stem}::{img_id}",
+            "prompt": prompt,
+            "data_uri": data_uri,
+        })
+
+    return requests, cached_hits
