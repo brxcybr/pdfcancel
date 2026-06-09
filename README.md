@@ -125,13 +125,26 @@ Produce structured JSONL alongside markdown for RAG/LLM pipelines:
 pdfcancel paper.pdf --chunks
 pdfcancel paper.pdf --chunks --chunk-size 512
 pdfcancel paper.pdf --chunks --chunker semantic
+pdfcancel paper.pdf --chunks --chunker hierarchical
 ```
 
 Chunks include rich metadata:
 - Section heading breadcrumb (`Strategy > Risk Management > Information Sharing`)
+- Hierarchical chunk IDs for section-aware retrieval (`chunk_id`, `parent_id`, sibling IDs)
 - Content type classification (`prose`, `figure`, `abstract`, `table`, `references`)
 - Document-level metadata (`doc_title`, `doc_author`, `doc_year`, `doc_doi`)
 - Figure blocks kept atomic — images and their descriptions are never split
+
+Chunking strategies:
+- `recursive`: fast markdown-aware splitting for general use
+- `semantic`: small semantic chunks for high-recall retrieval
+- `sentence`: sentence-bounded chunks
+- `hierarchical`: semantic chunks bounded by markdown sections, with parent/sibling metadata so a retrieval hit can be expanded to neighboring chunks and same-section figures
+
+For documents where charts, diagrams, or screenshots carry definitional context, combine
+`--full` with `--chunker hierarchical`. `--full` injects vision-generated figure
+descriptions before chunking, and hierarchical metadata keeps those figure chunks attached
+to the surrounding section.
 
 ### Search Index (`--index`)
 
@@ -214,7 +227,7 @@ Cancel options:
   --model MODEL          OCR model override
   --chunks               Produce chunked JSONL for RAG/LLM
   --chunk-size N         Max tokens per chunk (default: 1024)
-  --chunker TYPE         recursive | semantic | sentence
+  --chunker TYPE         recursive | semantic | sentence | hierarchical
   --index NAME           Add to a named search index
   --no-clean             Skip post-OCR cleanup
   --force                Re-process even if unchanged

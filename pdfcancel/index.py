@@ -65,7 +65,11 @@ def _init_db(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source TEXT NOT NULL,
             chunk_index INTEGER NOT NULL,
+            chunk_id TEXT,
+            parent_id TEXT,
             section TEXT,
+            section_path TEXT,
+            content_type TEXT,
             text TEXT NOT NULL,
             token_count INTEGER,
             embedding BLOB,
@@ -94,6 +98,21 @@ def _init_db(conn: sqlite3.Connection) -> None:
             chunk_count INTEGER
         );
     """)
+    _ensure_column(conn, "chunks", "chunk_id", "TEXT")
+    _ensure_column(conn, "chunks", "parent_id", "TEXT")
+    _ensure_column(conn, "chunks", "section_path", "TEXT")
+    _ensure_column(conn, "chunks", "content_type", "TEXT")
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    col_type: str,
+) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
 
 def ingest_chunks(
@@ -128,12 +147,18 @@ def ingest_chunks(
     for chunk, emb in zip(chunks, embeddings):
         meta = chunk.get("metadata", {})
         conn.execute(
-            """INSERT INTO chunks (source, chunk_index, section, text, token_count, embedding, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO chunks
+               (source, chunk_index, chunk_id, parent_id, section, section_path,
+                content_type, text, token_count, embedding, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 source_file,
                 meta.get("chunk_index", 0),
+                meta.get("chunk_id", ""),
+                meta.get("parent_id", ""),
                 meta.get("section", ""),
+                meta.get("section_path", meta.get("section", "")),
+                meta.get("content_type", "prose"),
                 chunk["text"],
                 meta.get("token_count", 0),
                 emb.astype(np.float32).tobytes(),
@@ -231,14 +256,15 @@ def _expand_context(
     conn: sqlite3.Connection,
     results: list[dict[str, Any]],
 ) -> None:
-    """Fetch the chunk immediately before and after each result.
+    """Fetch neighboring and same-section context for each result.
 
-    Adds 'context_before' and 'context_after' text fields to each result.
-    Only fetches neighbors from the same source document.
+    Adds linear neighbors for all indexes. For hierarchical indexes, also adds
+    same-section sibling snippets and figure chunks attached to the same parent.
     """
     for r in results:
         source = r["source"]
         chunk_idx = r.get("chunk_index", -1)
+        parent_id = r.get("parent_id") or ""
 
         # If we don't have chunk_index, try to get it from the DB
         if chunk_idx < 0:
@@ -261,6 +287,29 @@ def _expand_context(
             (source, chunk_idx + 1),
         ).fetchone()
         r["context_after"] = nxt[0] if nxt else ""
+
+        if not parent_id:
+            r["section_context"] = ""
+            r["figure_context"] = ""
+            continue
+
+        section_rows = conn.execute(
+            """SELECT text FROM chunks
+               WHERE source = ? AND parent_id = ? AND id != ?
+               ORDER BY ABS(chunk_index - ?), chunk_index
+               LIMIT 4""",
+            (source, parent_id, r["id"], chunk_idx),
+        ).fetchall()
+        r["section_context"] = "\n\n".join(row[0] for row in section_rows)
+
+        figure_rows = conn.execute(
+            """SELECT text FROM chunks
+               WHERE source = ? AND parent_id = ? AND content_type = 'figure'
+               ORDER BY chunk_index
+               LIMIT 3""",
+            (source, parent_id),
+        ).fetchall()
+        r["figure_context"] = "\n\n".join(row[0] for row in figure_rows)
 
 
 def list_indexes() -> list[dict[str, Any]]:
@@ -297,7 +346,8 @@ def _search_fts(
     """Full-text search using SQLite FTS5 with BM25 ranking."""
     rows = conn.execute(
         """SELECT c.id, c.text, c.source, c.section, c.token_count,
-                  c.chunk_index, c.metadata, rank * -1 as score
+                  c.chunk_index, c.metadata, c.chunk_id, c.parent_id,
+                  c.section_path, c.content_type, rank * -1 as score
            FROM chunks_fts fts
            JOIN chunks c ON c.id = fts.rowid
            WHERE chunks_fts MATCH ?
@@ -316,11 +366,14 @@ def _search_fts(
             "section": r[3],
             "token_count": r[4],
             "chunk_index": r[5],
-            "content_type": meta.get("content_type", "prose"),
             "doc_title": meta.get("doc_title", ""),
             "doc_author": meta.get("doc_author", ""),
             "doc_year": meta.get("doc_year", ""),
-            "score": r[7],
+            "chunk_id": r[7] or meta.get("chunk_id", ""),
+            "parent_id": r[8] or meta.get("parent_id", ""),
+            "section_path": r[9] or meta.get("section_path", r[3] or ""),
+            "content_type": r[10] or meta.get("content_type", "prose"),
+            "score": r[11],
             "method": "text",
         })
     return results
@@ -337,7 +390,9 @@ def _search_semantic(
 
     # Load all embeddings (fine for <100k chunks; for larger, use a vector DB)
     rows = conn.execute(
-        "SELECT id, text, source, section, token_count, chunk_index, metadata, embedding FROM chunks"
+        """SELECT id, text, source, section, token_count, chunk_index, metadata,
+                  embedding, chunk_id, parent_id, section_path, content_type
+           FROM chunks"""
     ).fetchall()
 
     if not rows:
@@ -357,10 +412,13 @@ def _search_semantic(
             "section": row[3],
             "token_count": row[4],
             "chunk_index": row[5],
-            "content_type": meta.get("content_type", "prose"),
             "doc_title": meta.get("doc_title", ""),
             "doc_author": meta.get("doc_author", ""),
             "doc_year": meta.get("doc_year", ""),
+            "chunk_id": row[8] or meta.get("chunk_id", ""),
+            "parent_id": row[9] or meta.get("parent_id", ""),
+            "section_path": row[10] or meta.get("section_path", row[3] or ""),
+            "content_type": row[11] or meta.get("content_type", "prose"),
             "score": similarity,
             "method": "semantic",
         })

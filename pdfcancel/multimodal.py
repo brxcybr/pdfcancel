@@ -228,8 +228,14 @@ def _split_description_data(description: str) -> tuple[str, str]:
 
     Returns (prose, data_table) where data_table may be empty string.
     """
-    # Look for DATA: marker (case-insensitive, possibly preceded by newlines)
-    parts = re.split(r"\n\s*DATA:\s*\n", description, maxsplit=1, flags=re.IGNORECASE)
+    # Look for DATA: marker (case-insensitive, optionally markdown-bolded and
+    # preceded by a horizontal rule). Vision models vary this formatting.
+    parts = re.split(
+        r"\n\s*(?:---+\s*\n)?\s*\*{0,2}DATA:\*{0,2}\s*\n",
+        description,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )
     prose = parts[0].strip()
     data_table = parts[1].strip() if len(parts) > 1 else ""
     return prose, data_table

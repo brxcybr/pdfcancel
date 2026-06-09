@@ -76,7 +76,7 @@ except ImportError:
 @click.option("--chunks", is_flag=True, help="Also produce chunked JSONL output.")
 @click.option("--chunk-size", type=int, default=1024,
               help="Max tokens per chunk (default: 1024).")
-@click.option("--chunker", type=click.Choice(["recursive", "semantic", "sentence"]),
+@click.option("--chunker", type=click.Choice(["recursive", "semantic", "sentence", "hierarchical"]),
               default="recursive", help="Chunking strategy (default: recursive).")
 @click.option("--index", "index_name", default=None,
               help="Add to a named search index (implies --chunks).")
@@ -275,6 +275,10 @@ def search(index_name, query, top_k, mode, context, index_path):
         if context and r.get("context_after"):
             ctx = r["context_after"][:120].replace("\n", " ").strip()
             console.print(f"   [dim]└ {ctx}...[/dim]")
+
+        if context and r.get("figure_context"):
+            ctx = r["figure_context"][:160].replace("\n", " ").strip()
+            console.print(f"   [dim]▣ {ctx}...[/dim]")
 
         console.print()
 

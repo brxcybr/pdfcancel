@@ -110,8 +110,6 @@ def convert_single(
     Returns the path to the output file.
     """
     from pdfcancel.clean import clean_markdown
-    from pdfcancel.images import process_images
-
     settings.require_api_key()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -296,7 +294,7 @@ def convert_batch_pipeline(
     Uploads all PDFs, submits batch OCR, optionally batch vision for --full,
     then performs local cleanup, description injection, chunking, and output.
     """
-    from pdfcancel.batch import batch_ocr, batch_vision, BatchResult
+    from pdfcancel.batch import batch_ocr, batch_vision
     from pdfcancel.clean import clean_markdown
     from pdfcancel.images import process_images_from_raw
     from pdfcancel.multimodal import (
