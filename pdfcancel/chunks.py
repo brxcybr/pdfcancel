@@ -44,6 +44,7 @@ _FIGURE_BLOCK_RE = re.compile(
 )
 
 _SENTINEL_PREFIX = "\x00FIGBLOCK:"
+_SENTINEL_RE = re.compile(r"\x00FIGBLOCK:\d+\x00")
 
 
 def _protect_figure_blocks(text: str) -> tuple[str, dict[str, str]]:
@@ -74,6 +75,14 @@ def _restore_figure_blocks(text: str, blocks: dict[str, str]) -> str:
     for sentinel_id, original in blocks.items():
         text = text.replace(sentinel_id, original)
     return text
+
+
+def _clean_metadata_text(text: str) -> str:
+    """Remove protected-block sentinels and control chars from metadata strings."""
+    text = _SENTINEL_RE.sub("", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    text = re.sub(r"FIGBLOCK:\d+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _classify_content(text: str) -> str:
@@ -376,8 +385,9 @@ def _section_blocks(text: str) -> list[dict[str, Any]]:
 
     for idx, (start, level, title) in enumerate(headings):
         end = headings[idx + 1][0] if idx + 1 < len(headings) else len(text)
-        active_titles[level] = title
-        active_ids[level] = _heading_slug(title)
+        clean_title = _clean_metadata_text(title)
+        active_titles[level] = clean_title
+        active_ids[level] = _heading_slug(clean_title)
         for deeper in list(active_titles):
             if deeper > level:
                 del active_titles[deeper]
@@ -388,7 +398,7 @@ def _section_blocks(text: str) -> list[dict[str, Any]]:
                 "start": start,
                 "end": end,
                 "level": level,
-                "title": title,
+                "title": clean_title,
                 "path": " > ".join(active_titles[k] for k in ordered_levels),
                 "path_ids": [active_ids[k] for k in ordered_levels],
             }

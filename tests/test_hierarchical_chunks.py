@@ -91,3 +91,32 @@ The receiver operating characteristic is discussed next.
     assert len(figure_chunks) == 1
     assert "Figure description" in figure_chunks[0]["text"]
     assert "| AUC | 0.94 |" in figure_chunks[0]["text"]
+
+
+def test_hierarchical_section_metadata_strips_figure_sentinels(monkeypatch):
+    monkeypatch.setattr(chunks_mod, "_create_chunker", lambda *_args, **_kwargs: FakeChunker())
+    markdown = """# Conclusion
+
+## ![img-1.jpeg](img-1.jpeg)
+> **Figure description:** A chart in a malformed OCR heading.
+
+### FIGBLOCK:9
+
+The section text explains the chart.
+"""
+
+    chunks = chunk_markdown(
+        markdown,
+        source_file="book.pdf",
+        chunker_type="hierarchical",
+        chunk_size=64,
+    )
+
+    assert chunks
+    for chunk in chunks:
+        section_path = chunk["metadata"]["section_path"]
+        section_title = chunk["metadata"]["section_title"]
+        assert "FIGBLOCK" not in section_path
+        assert "\x00" not in section_path
+        assert "FIGBLOCK" not in section_title
+        assert "\x00" not in section_title
