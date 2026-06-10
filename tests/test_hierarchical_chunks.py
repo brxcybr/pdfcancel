@@ -93,6 +93,31 @@ The receiver operating characteristic is discussed next.
     assert "| AUC | 0.94 |" in figure_chunks[0]["text"]
 
 
+def test_hierarchical_chunks_preserve_structured_chart_metadata(monkeypatch):
+    monkeypatch.setattr(chunks_mod, "_create_chunker", lambda *_args, **_kwargs: FakeChunker())
+    markdown = """# Course
+
+## Figures
+
+![chart](img-1.jpeg)
+> **Figure description:** A line chart shows loss.
+> **Structured chart data:**
+> line_chart; Loss; confidence=exact
+<!-- pdfcancel-chart-data: {"chart_data":{"figure_type":"line_chart","title":"Loss","x_axis":{"label":"Epoch","unit":""},"y_axis":{"label":"Loss","unit":""},"series":[{"name":"loss","points":[{"x":"1","y":0.5,"label":""}]}],"table":{"columns":[],"rows":[]},"confidence":"exact","notes":""},"vega_lite_spec":{"mark":"line"}} -->
+"""
+
+    result = chunk_markdown(
+        markdown,
+        source_file="paper.pdf",
+        chunker_type="hierarchical",
+    )
+
+    figure = next(c for c in result if c["metadata"]["content_type"] == "figure")
+    assert figure["metadata"]["has_structured_chart_data"] is True
+    assert figure["metadata"]["chart_data"]["title"] == "Loss"
+    assert figure["metadata"]["vega_lite_spec"]["mark"] == "line"
+
+
 def test_hierarchical_section_metadata_strips_figure_sentinels(monkeypatch):
     monkeypatch.setattr(chunks_mod, "_create_chunker", lambda *_args, **_kwargs: FakeChunker())
     markdown = """# Conclusion

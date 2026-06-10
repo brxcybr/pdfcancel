@@ -91,6 +91,10 @@ pdfcancel paper.pdf --embed-images     # inline as base64 data URIs
 ### Multimodal Extraction (`--full`)
 
 Sends each extracted image to a vision model for AI-generated descriptions. Descriptions are context-enriched — the vision model receives surrounding document text to ground its output in the paper's terminology.
+When a chart, graph, matrix, or visual table contains extractable data, `--full`
+also asks the vision model for a strict JSON payload. pdfcancel renders that
+payload as searchable markdown table data and preserves it as hidden metadata for
+downstream chunking and indexing.
 
 ```bash
 pdfcancel paper.pdf --full
@@ -104,6 +108,12 @@ Produces descriptions like:
 > **Figure description:** This flowchart depicts the CQA workflow for
 > an AI-driven interactive chart transformation system. Components include
 > a query input, Content-based QA model, and report generator...
+> **Structured chart data:**
+> bar_chart; Model accuracy; confidence=estimated
+>
+> | Series | X | Y | Label |
+> | --- | --- | --- | --- |
+> | Accuracy | CNN | ~91.5 | CNN |
 ```
 
 Descriptions are cached by image content hash — re-runs skip already-described images.
@@ -134,6 +144,8 @@ Chunks include rich metadata:
 - Content type classification (`prose`, `figure`, `abstract`, `table`, `references`)
 - Document-level metadata (`doc_title`, `doc_author`, `doc_year`, `doc_doi`)
 - Figure blocks kept atomic — images and their descriptions are never split
+- Structured chart/table metadata from `--full`, including extracted data and
+  approximate Vega-Lite specs where a chart can be reconstructed
 
 Chunking strategies:
 - `recursive`: fast markdown-aware splitting for general use
@@ -168,6 +180,7 @@ Search features:
 - **Hybrid mode** (default): BM25 full-text + semantic cosine similarity
 - **Weighted scoring**: abstracts boosted 1.5×, figures 1.3×, references demoted 0.5×
 - **Context expansion** (`--context`): shows neighboring chunks for each result
+- Structured chart metadata available in search result dictionaries
 - Local embeddings via model2vec — no API cost for search
 
 ### Zotero Integration
@@ -261,6 +274,7 @@ pdfcancel/
 │   ├── clean.py         # Post-OCR cleanup (5 passes + classification)
 │   ├── images.py        # Image extraction + direct Mistral SDK
 │   ├── multimodal.py    # Context-enriched vision descriptions
+│   ├── charts.py        # Structured chart/table data + Vega-Lite helpers
 │   ├── enhance.py       # Upgrade existing markdown
 │   ├── chunks.py        # Figure-aware chunking + content classification
 │   ├── index.py         # SQLite FTS5 + semantic search + weighted scoring
@@ -294,8 +308,8 @@ pdfcancel/
 - [x] **Phase 6:** `zotero` — Zotero library sync with citation frontmatter
 - [x] Post-OCR cleanup (watermarks, headers, page numbers, broken sentences)
 - [x] Document-level metadata propagation to all chunks
-- [ ] Vega-Lite chart spec extraction from figures
-- [ ] Structured data table extraction from chart images
+- [x] Vega-Lite chart spec extraction from figures
+- [x] Structured data table extraction from chart images
 
 ## License
 

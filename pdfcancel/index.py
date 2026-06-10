@@ -373,6 +373,9 @@ def _search_fts(
             "parent_id": r[8] or meta.get("parent_id", ""),
             "section_path": r[9] or meta.get("section_path", r[3] or ""),
             "content_type": r[10] or meta.get("content_type", "prose"),
+            "has_structured_chart_data": meta.get("has_structured_chart_data", False),
+            "chart_data": meta.get("chart_data"),
+            "vega_lite_spec": meta.get("vega_lite_spec"),
             "score": r[11],
             "method": "text",
         })
@@ -419,6 +422,9 @@ def _search_semantic(
             "parent_id": row[9] or meta.get("parent_id", ""),
             "section_path": row[10] or meta.get("section_path", row[3] or ""),
             "content_type": row[11] or meta.get("content_type", "prose"),
+            "has_structured_chart_data": meta.get("has_structured_chart_data", False),
+            "chart_data": meta.get("chart_data"),
+            "vega_lite_spec": meta.get("vega_lite_spec"),
             "score": similarity,
             "method": "semantic",
         })

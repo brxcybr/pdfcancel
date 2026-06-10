@@ -17,6 +17,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from pdfcancel.charts import extract_chart_metadata
+
 
 # ---------------------------------------------------------------------------
 # Figure block detection
@@ -253,6 +255,7 @@ def chunk_markdown(
 
         # Classify content type
         content_type = _classify_content(text)
+        chart_meta = extract_chart_metadata(text)
 
         results.append({
             "text": text,
@@ -266,6 +269,7 @@ def chunk_markdown(
                 "start_index": chunk.start_index,
                 "end_index": chunk.end_index,
                 **doc_meta,
+                **chart_meta,
             },
         })
 
@@ -430,6 +434,7 @@ def _chunk_markdown_hierarchical(
         for local_idx, chunk in enumerate(raw_chunks):
             text = _restore_figure_blocks(chunk.text, figure_blocks)
             content_type = _classify_content(text)
+            chart_meta = extract_chart_metadata(text)
             chunk_id = _stable_id(source_file, parent_id, local_idx, chunk.start_index)
             section_child_ids.append(chunk_id)
             results.append(
@@ -456,6 +461,7 @@ def _chunk_markdown_hierarchical(
                         "end_index": section["start"] + chunk.end_index,
                         "chunker_type": "hierarchical",
                         **doc_meta,
+                        **chart_meta,
                     },
                 }
             )
