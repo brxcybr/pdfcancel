@@ -14,7 +14,6 @@ Flow:
 
 from __future__ import annotations
 
-import base64
 import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,9 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 
 from pdfcancel.config import Settings
+from pdfcancel.images import decode_page_images
+from pdfcancel.pages import join_pages
+from pdfcancel.retry import with_retry
 
 console = Console()
 
@@ -40,11 +42,15 @@ class BatchResult:
         custom_id: str,
         markdown: str,
         images: dict[str, bytes],
+        page_count: int = 0,
+        dropped_images: int = 0,
     ):
         self.pdf_path = pdf_path
         self.custom_id = custom_id
         self.markdown = markdown
         self.images = images
+        self.page_count = page_count
+        self.dropped_images = dropped_images
 
 
 def batch_ocr(
@@ -52,6 +58,7 @@ def batch_ocr(
     settings: Settings,
     *,
     include_images: bool = False,
+    preserve_pages: bool = False,
 ) -> list[BatchResult]:
     """Submit all PDFs as a single OCR batch job and return results.
 
@@ -83,12 +90,19 @@ def batch_ocr(
             custom_id = f"ocr-{idx}"
             try:
                 with open(pdf_path, "rb") as f:
-                    uploaded = client.files.upload(
-                        file={"file_name": pdf_path.name, "content": f.read()},
+                    content = f.read()
+                uploaded = with_retry(
+                    lambda: client.files.upload(
+                        file={"file_name": pdf_path.name, "content": content},
                         purpose="ocr",
-                    )
-                signed = client.files.get_signed_url(
-                    file_id=uploaded.id, expiry=1
+                    ),
+                    description=f"upload of {pdf_path.name}",
+                )
+                signed = with_retry(
+                    lambda: client.files.get_signed_url(
+                        file_id=uploaded.id, expiry=1
+                    ),
+                    description="signed URL request",
                 )
                 uploads.append({
                     "custom_id": custom_id,
@@ -122,11 +136,14 @@ def batch_ocr(
             "body": body,
         })
 
-    job = client.batch.jobs.create(
-        requests=requests,
-        model=settings.ocr_model,
-        endpoint="/v1/ocr",
-        metadata={"job_type": "pdfcancel_ocr"},
+    job = with_retry(
+        lambda: client.batch.jobs.create(
+            requests=requests,
+            model=settings.ocr_model,
+            endpoint="/v1/ocr",
+            metadata={"job_type": "pdfcancel_ocr"},
+        ),
+        description="batch OCR job creation",
     )
     console.print(f"  Job ID: [cyan]{job.id}[/cyan]  Status: {job.status}")
 
@@ -142,7 +159,9 @@ def batch_ocr(
 
     # Step 4: Retrieve results
     console.print("[bold]Retrieving OCR results...[/bold]")
-    results = _retrieve_ocr_results(client, job, uploads, include_images)
+    results = _retrieve_ocr_results(
+        client, job, uploads, include_images, preserve_pages=preserve_pages,
+    )
 
     console.print(f"[green]✓ {len(results)} PDF(s) processed via batch OCR.[/green]")
     return results
@@ -159,7 +178,10 @@ def _poll_batch_job(client: Any, job_id: str) -> Any:
     ) as progress:
         task = progress.add_task("Waiting for batch job...", total=None)
         while True:
-            job = client.batch.jobs.get(job_id=job_id)
+            job = with_retry(
+                lambda: client.batch.jobs.get(job_id=job_id),
+                description="batch job status check",
+            )
             elapsed = int(time.time() - start)
             desc = (
                 f"Batch: {job.status} "
@@ -184,6 +206,8 @@ def _retrieve_ocr_results(
     job: Any,
     uploads: list[dict[str, Any]],
     include_images: bool,
+    *,
+    preserve_pages: bool = False,
 ) -> list[BatchResult]:
     """Parse OCR batch job outputs into BatchResult objects."""
     # Build custom_id → upload mapping
@@ -192,7 +216,10 @@ def _retrieve_ocr_results(
     results = []
 
     # Get results inline
-    completed_job = client.batch.jobs.get(job_id=job.id, inline=True)
+    completed_job = with_retry(
+        lambda: client.batch.jobs.get(job_id=job.id, inline=True),
+        description="batch results retrieval",
+    )
 
     if not completed_job.outputs:
         console.print("[yellow]No outputs in batch job response.[/yellow]")
@@ -216,6 +243,7 @@ def _retrieve_ocr_results(
         body = response.body
         markdown_parts = []
         images: dict[str, bytes] = {}
+        dropped = 0
 
         pages = body.get("pages", []) if isinstance(body, dict) else getattr(body, "pages", [])
         for page in pages:
@@ -224,23 +252,28 @@ def _retrieve_ocr_results(
 
             if include_images:
                 page_images = page.get("images", []) if isinstance(page, dict) else getattr(page, "images", [])
+                items = []
                 for img in page_images:
                     img_id = img.get("id", "") if isinstance(img, dict) else getattr(img, "id", "")
                     img_b64 = img.get("image_base64", "") if isinstance(img, dict) else getattr(img, "image_base64", "")
-                    if img_id and img_b64:
-                        if "," in img_b64:
-                            img_b64 = img_b64.split(",", 1)[1]
-                        try:
-                            images[img_id] = base64.b64decode(img_b64)
-                        except Exception:
-                            pass
+                    items.append((img_id, img_b64))
+                dropped += decode_page_images(images, items)
 
-        markdown = "\n\n".join(markdown_parts)
+        if dropped:
+            console.print(
+                f"  [yellow]Warning: {dropped} image(s) from "
+                f"{upload['pdf_path'].name} could not be decoded and were "
+                "dropped.[/yellow]"
+            )
+
+        markdown = join_pages(markdown_parts, preserve_pages=preserve_pages)
         results.append(BatchResult(
             pdf_path=upload["pdf_path"],
             custom_id=custom_id,
             markdown=markdown,
             images=images,
+            page_count=len(markdown_parts),
+            dropped_images=dropped,
         ))
 
     return results
@@ -289,11 +322,14 @@ def batch_vision(
             },
         })
 
-    job = client.batch.jobs.create(
-        requests=requests,
-        model=settings.multimodal_model,
-        endpoint="/v1/chat/completions",
-        metadata={"job_type": "pdfcancel_vision"},
+    job = with_retry(
+        lambda: client.batch.jobs.create(
+            requests=requests,
+            model=settings.multimodal_model,
+            endpoint="/v1/chat/completions",
+            metadata={"job_type": "pdfcancel_vision"},
+        ),
+        description="batch vision job creation",
     )
     console.print(f"  Job ID: [cyan]{job.id}[/cyan]  Status: {job.status}")
 
@@ -305,7 +341,10 @@ def batch_vision(
         return {}
 
     # Retrieve results
-    completed = client.batch.jobs.get(job_id=job.id, inline=True)
+    completed = with_retry(
+        lambda: client.batch.jobs.get(job_id=job.id, inline=True),
+        description="batch results retrieval",
+    )
     descriptions: dict[str, str] = {}
 
     if not completed.outputs:

@@ -17,7 +17,16 @@ import re
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
+
 from pdfcancel.charts import extract_chart_metadata
+from pdfcancel.pages import (
+    build_page_index,
+    page_range_for_span,
+    strip_page_markers,
+)
+
+console = Console()
 
 
 # ---------------------------------------------------------------------------
@@ -239,11 +248,15 @@ def chunk_markdown(
     protected_text, figure_blocks = _protect_figure_blocks(markdown_content)
 
     # Phase 2: Chunk the protected text
-    chunker = _create_chunker(chunker_type, chunk_size)
+    try:
+        chunker = _create_chunker(chunker_type, chunk_size)
+    except ImportError as e:
+        raise SystemExit(f"Error: {e}") from e
     raw_chunks = chunker(protected_text)
 
     # Phase 3: Restore figure blocks and build metadata
     heading_index = _build_heading_index(markdown_content)
+    page_index = build_page_index(protected_text)
 
     results = []
     for idx, chunk in enumerate(raw_chunks):
@@ -253,10 +266,22 @@ def chunk_markdown(
         # Map back to original position for section lookup
         section = _section_at_offset(heading_index, chunk.start_index)
 
+        # Page tracking (--preserve-pages): record the page range covered
+        # by this chunk, then strip the marker comments from the text
+        page_start, page_end = page_range_for_span(
+            page_index, chunk.start_index, chunk.end_index,
+        )
+        text = strip_page_markers(text)
+
         # Classify content type
         content_type = _classify_content(text)
         chart_meta = extract_chart_metadata(text)
 
+        page_meta = (
+            {"page_start": page_start, "page_end": page_end}
+            if page_start is not None
+            else {}
+        )
         results.append({
             "text": text,
             "metadata": {
@@ -268,6 +293,7 @@ def chunk_markdown(
                 "token_count": chunk.token_count,
                 "start_index": chunk.start_index,
                 "end_index": chunk.end_index,
+                **page_meta,
                 **doc_meta,
                 **chart_meta,
             },
@@ -297,11 +323,11 @@ def _create_chunker(chunker_type: str, chunk_size: int) -> Any:
     elif chunker_type == "semantic":
         try:
             from chonkie import SemanticChunker
-        except ImportError:
-            raise SystemExit(
-                "Error: Semantic chunking requires chonkie[semantic].\n"
-                "  pip install 'chonkie[semantic]'"
-            )
+        except ImportError as e:
+            raise ImportError(
+                "Semantic chunking requires the optional chonkie[semantic] extra.\n"
+                '  pip install "pdfcancel[chunking]"'
+            ) from e
         return SemanticChunker(chunk_size=chunk_size)
     elif chunker_type == "sentence":
         from chonkie import SentenceChunker
@@ -418,7 +444,16 @@ def _chunk_markdown_hierarchical(
 ) -> list[dict[str, Any]]:
     doc_meta = _extract_doc_metadata(markdown_content, source_file)
     protected_text, figure_blocks = _protect_figure_blocks(markdown_content)
-    chunker = _create_chunker("semantic", chunk_size)
+    try:
+        chunker = _create_chunker("semantic", chunk_size)
+    except ImportError as e:
+        console.print(
+            f"  [yellow]Warning: {e}[/yellow]\n"
+            "  [yellow]Falling back to recursive chunking for hierarchical "
+            "mode.[/yellow]"
+        )
+        chunker = _create_chunker("recursive", chunk_size)
+    page_index = build_page_index(protected_text)
 
     results: list[dict[str, Any]] = []
     global_idx = 0
@@ -433,8 +468,19 @@ def _chunk_markdown_hierarchical(
         start_result_idx = len(results)
         for local_idx, chunk in enumerate(raw_chunks):
             text = _restore_figure_blocks(chunk.text, figure_blocks)
+            abs_start = section["start"] + chunk.start_index
+            abs_end = section["start"] + chunk.end_index
+            page_start, page_end = page_range_for_span(
+                page_index, abs_start, abs_end,
+            )
+            text = strip_page_markers(text)
             content_type = _classify_content(text)
             chart_meta = extract_chart_metadata(text)
+            page_meta = (
+                {"page_start": page_start, "page_end": page_end}
+                if page_start is not None
+                else {}
+            )
             chunk_id = _stable_id(source_file, parent_id, local_idx, chunk.start_index)
             section_child_ids.append(chunk_id)
             results.append(
@@ -457,9 +503,10 @@ def _chunk_markdown_hierarchical(
                         "content_type": content_type,
                         "has_figure": content_type == "figure" or "![" in text,
                         "token_count": chunk.token_count,
-                        "start_index": section["start"] + chunk.start_index,
-                        "end_index": section["start"] + chunk.end_index,
+                        "start_index": abs_start,
+                        "end_index": abs_end,
                         "chunker_type": "hierarchical",
+                        **page_meta,
                         **doc_meta,
                         **chart_meta,
                     },

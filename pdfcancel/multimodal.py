@@ -21,6 +21,7 @@ from pdfcancel.charts import (
     split_chart_json,
 )
 from pdfcancel.config import Settings
+from pdfcancel.retry import with_retry
 
 console = Console()
 
@@ -145,18 +146,21 @@ def describe_images(
         console.print(f"    [dim]Describing image {idx}/{total}: {img_id}[/dim]")
 
         try:
-            response = client.chat.complete(
-                model=settings.multimodal_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": data_uri}},
-                        ],
-                    }
-                ],
-                max_tokens=400,
+            response = with_retry(
+                lambda: client.chat.complete(
+                    model=settings.multimodal_model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_uri}},
+                            ],
+                        }
+                    ],
+                    max_tokens=400,
+                ),
+                description=f"vision description of {img_id}",
             )
             description = response.choices[0].message.content.strip()
             descriptions[img_id] = description

@@ -77,7 +77,7 @@ def enhance_markdown(
 
         # Extract images from the source PDF
         console.print(f"    Extracting images from {pdf_path.name} ...")
-        _, raw_images = ocr_with_images(pdf_path, settings)
+        raw_images = ocr_with_images(pdf_path, settings).images
 
         if raw_images:
             # Filter to images that don't already have descriptions
@@ -94,6 +94,7 @@ def enhance_markdown(
                     undescribed,
                     settings,
                     cached_descriptions=cached,
+                    markdown_content=markdown_content,
                 )
                 markdown_content = inject_descriptions(markdown_content, descriptions)
 

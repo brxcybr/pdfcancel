@@ -127,6 +127,40 @@ pdfcancel paper.pdf --enhance paper.md             # apply cleanup
 pdfcancel paper.pdf --enhance paper.md --full      # + add image descriptions
 ```
 
+### Page-Level Citations (`--preserve-pages`)
+
+By default, cleanup strips page numbers and page boundaries are lost. For
+academic work that needs page-level citations, `--preserve-pages` injects an
+HTML comment marker (`<!-- pdfcancel-page: N -->`, 1-indexed) before each
+page's markdown. Markers survive post-OCR cleanup, and the chunker records
+`page_start` / `page_end` metadata on every chunk (stripping the comments
+from the chunk text). Indexed chunks store these as columns, and search
+results show the page citation (`p. 12` / `pp. 12–14`).
+
+```bash
+pdfcancel paper.pdf --preserve-pages --index myproject
+pdfcancel search myproject "threat intelligence"   # results cite pages
+```
+
+Existing indexes keep working — chunks indexed without `--preserve-pages`
+simply have no page info.
+
+### OCR Output Validation
+
+After every OCR run, pdfcancel validates the response before writing output:
+
+- The response must contain at least one page.
+- Extracted text must average at least ~20 characters per page (catches
+  empty/truncated OCR responses).
+- If [pypdf](https://pypi.org/project/pypdf/) can read the source PDF, the
+  OCR page count is compared to the actual page count and a warning is
+  printed on mismatch.
+- Images that fail base64 decoding are counted and reported instead of
+  silently dropped.
+
+On validation failure the output file is **not** written, the failure is
+reported per file, and the CLI exits non-zero if any file failed.
+
 ### RAG Chunking (`--chunks`)
 
 Produce structured JSONL alongside markdown for RAG/LLM pipelines:
@@ -243,6 +277,7 @@ Cancel options:
   --chunker TYPE         recursive | semantic | sentence | hierarchical
   --index NAME           Add to a named search index
   --no-clean             Skip post-OCR cleanup
+  --preserve-pages       Keep page boundaries; chunks get page_start/page_end
   --force                Re-process even if unchanged
   --verbose              Show detailed progress
 
@@ -295,6 +330,7 @@ pdfcancel/
 | `click` | CLI framework |
 | `rich` | Terminal formatting and progress bars |
 | `python-dotenv` | `.env` file loading |
+| `pypdf` | Page-count validation of OCR output |
 | `model2vec` | Local embeddings for semantic search (optional) |
 | `numpy` | Cosine similarity for search (optional) |
 
