@@ -116,13 +116,11 @@ def describe_images(
     Returns:
         Mapping of image ID → text description.
     """
-    from mistralai.client import Mistral
-
     if not images:
         return {}
 
     cached = cached_descriptions or {}
-    client = Mistral(api_key=settings.require_api_key())
+    client = settings.build_client()
     descriptions: dict[str, str] = {}
     total = len(images)
 

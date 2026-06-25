@@ -69,15 +69,24 @@ def enhance_markdown(
         if removed > 0:
             console.print(f"    Cleaned {removed} artifact lines")
 
-    # If --full, extract images from PDF and describe any that lack descriptions
+    # If --full, describe images that lack descriptions. Prefer images already
+    # extracted to disk (<stem>_images/) so this step can run against an
+    # OCR-less server (e.g. a local vLLM instance); only fall back to OCR
+    # extraction when no local images are found.
     if full:
-        from pdfcancel.images import ocr_with_images
         from pdfcancel.multimodal import describe_images, inject_descriptions
         from pdfcancel.convert import load_manifest, save_manifest
 
-        # Extract images from the source PDF
-        console.print(f"    Extracting images from {pdf_path.name} ...")
-        raw_images = ocr_with_images(pdf_path, settings).images
+        raw_images = _load_local_images(md_path)
+        if raw_images:
+            console.print(
+                f"    Using {len(raw_images)} image(s) already on disk "
+                f"({md_path.stem}_images/)"
+            )
+        else:
+            from pdfcancel.images import ocr_with_images
+            console.print(f"    Extracting images from {pdf_path.name} ...")
+            raw_images = ocr_with_images(pdf_path, settings).images
 
         if raw_images:
             # Filter to images that don't already have descriptions
@@ -118,6 +127,31 @@ def enhance_markdown(
     out_path.write_text(markdown_content)
 
     return out_path
+
+
+def _load_local_images(md_path: Path) -> dict[str, bytes]:
+    """Load images already extracted beside an existing markdown file.
+
+    Looks for a companion ``<stem>_images/`` directory next to the markdown
+    file and reads each image into a ``{filename: bytes}`` mapping keyed by
+    file name (e.g. ``img-0.jpeg``). Those keys match how image references are
+    written in the markdown, so the existing description-injection logic works
+    unchanged. Returns an empty dict when the directory is absent, signalling
+    the caller to fall back to OCR extraction.
+    """
+    images: dict[str, bytes] = {}
+    img_dir = md_path.parent / f"{md_path.stem}_images"
+    if not img_dir.is_dir():
+        return images
+
+    supported = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif"}
+    for path in sorted(img_dir.iterdir()):
+        if path.is_file() and path.suffix.lower() in supported:
+            try:
+                images[path.name] = path.read_bytes()
+            except OSError:
+                continue
+    return images
 
 
 def _find_undescribed_images(

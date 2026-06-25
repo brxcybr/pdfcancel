@@ -64,9 +64,7 @@ def ocr_with_images(
     and the count of images dropped due to decode failures.
     When preserve_pages is True, page markers are injected at join time.
     """
-    from mistralai.client import Mistral
-
-    client = Mistral(api_key=settings.require_api_key())
+    client = settings.build_client()
 
     # Upload PDF to Mistral for OCR
     with open(pdf_path, "rb") as f:

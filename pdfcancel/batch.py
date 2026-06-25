@@ -70,9 +70,7 @@ def batch_ocr(
     Returns:
         List of BatchResult with markdown and optional image maps.
     """
-    from mistralai.client import Mistral
-
-    client = Mistral(api_key=settings.require_api_key())
+    client = settings.build_client()
     total = len(pdf_paths)
 
     # Step 1: Upload PDFs and get signed URLs
@@ -297,8 +295,7 @@ def batch_vision(
     if not image_requests:
         return {}
 
-    from mistralai.client import Mistral
-    client = Mistral(api_key=settings.require_api_key())
+    client = settings.build_client()
 
     total = len(image_requests)
     console.print(f"\n[bold]Submitting batch vision job ({total} image(s))...[/bold]")

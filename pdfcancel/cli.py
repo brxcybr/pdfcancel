@@ -70,6 +70,9 @@ except ImportError:
               help="Full multimodal: AI-describe charts, figures, and diagrams.")
 @click.option("--full-model", default=None,
               help="Vision model for --full (default: pixtral-large-latest).")
+@click.option("--mistral-url", default=None,
+              help="Custom Mistral-compatible server URL, e.g. a local vLLM "
+                   "instance (overrides MISTRAL_BASE_URL).")
 @click.option("--enhance", "enhance_md", type=click.Path(exists=True), default=None,
               help="Enhance an existing markdown file.")
 @click.option("--model", default=None, help="OCR model override (default: mistral-ocr-latest).")
@@ -94,8 +97,8 @@ except ImportError:
               help="Exclude PDFs whose filename contains this text (repeatable).")
 def cancel(
     path, output_dir, images, embed_images, plaintext, full, full_model,
-    enhance_md, model, chunks, chunk_size, chunker, index_name, index_path,
-    no_clean, preserve_pages, force, verbose, batch, exclude,
+    mistral_url, enhance_md, model, chunks, chunk_size, chunker, index_name,
+    index_path, no_clean, preserve_pages, force, verbose, batch, exclude,
 ):
     """Cancel PDFs — convert to clean markdown.
 
@@ -113,6 +116,8 @@ def cancel(
         settings.ocr_model = model
     if full_model:
         settings.multimodal_model = full_model
+    if mistral_url:
+        settings.mistral_base_url = mistral_url
 
     # --index implies --chunks; set custom index path if provided
     if index_name:
