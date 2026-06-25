@@ -14,7 +14,14 @@ from pathlib import Path
 
 from rich.console import Console
 
+from pdfcancel.charts import (
+    chart_data_comment,
+    chart_prompt_instructions,
+    render_chart_data_markdown,
+    split_chart_json,
+)
 from pdfcancel.config import Settings
+from pdfcancel.retry import with_retry
 
 console = Console()
 
@@ -38,6 +45,7 @@ _BASE_PROMPT = (
     "followed by a markdown table extracting the key data points. Use ~ to mark "
     "approximate/estimated values read from the chart. If the figure has no "
     "extractable tabular data, omit the DATA: section entirely."
+    + chart_prompt_instructions()
 )
 
 # Context window: chars before/after the image reference to extract
@@ -108,13 +116,11 @@ def describe_images(
     Returns:
         Mapping of image ID → text description.
     """
-    from mistralai.client import Mistral
-
     if not images:
         return {}
 
     cached = cached_descriptions or {}
-    client = Mistral(api_key=settings.require_api_key())
+    client = settings.build_client()
     descriptions: dict[str, str] = {}
     total = len(images)
 
@@ -138,18 +144,21 @@ def describe_images(
         console.print(f"    [dim]Describing image {idx}/{total}: {img_id}[/dim]")
 
         try:
-            response = client.chat.complete(
-                model=settings.multimodal_model,
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": prompt},
-                            {"type": "image_url", "image_url": {"url": data_uri}},
-                        ],
-                    }
-                ],
-                max_tokens=400,
+            response = with_retry(
+                lambda: client.chat.complete(
+                    model=settings.multimodal_model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_uri}},
+                            ],
+                        }
+                    ],
+                    max_tokens=400,
+                ),
+                description=f"vision description of {img_id}",
             )
             description = response.choices[0].message.content.strip()
             descriptions[img_id] = description
@@ -187,8 +196,11 @@ def inject_descriptions(
         if not description or description.startswith("[Image description unavailable"):
             continue
 
-        # Split description and optional structured data
-        prose, data_table = _split_description_data(description)
+        # Split description, optional markdown DATA table, and optional strict
+        # CHART_JSON payload. The JSON is rendered for search and preserved in
+        # a hidden comment so chunks can carry structured metadata.
+        description_text, chart_data = split_chart_json(description)
+        prose, data_table = _split_description_data(description_text)
 
         # Find all markdown image references that contain this image ID
         # Handle both raw OCR refs (img-0.jpeg) and rewritten paths
@@ -199,7 +211,7 @@ def inject_descriptions(
         # Pattern: ![anything](anything containing img_stem.ext)
         # Use a non-greedy match for the path to handle parens in filenames
         pattern = re.compile(
-            r"(!\[[^\]]*\]\(.+?"
+            r"(!\[[^\]]*\]\([^)]*?"
             + re.escape(img_stem)
             + re.escape(img_ext)
             + r"\))"
@@ -213,6 +225,12 @@ def inject_descriptions(
             block += "\n>\n" + "\n".join(
                 f"> {line}" for line in data_table.strip().splitlines()
             )
+        chart_block = render_chart_data_markdown(chart_data)
+        if chart_block:
+            block += "\n" + chart_block
+        chart_comment = chart_data_comment(chart_data)
+        if chart_comment:
+            block += "\n" + chart_comment
 
         def _insert_desc(match: re.Match, _block: str = block) -> str:
             img_ref = match.group(1)
@@ -228,8 +246,14 @@ def _split_description_data(description: str) -> tuple[str, str]:
 
     Returns (prose, data_table) where data_table may be empty string.
     """
-    # Look for DATA: marker (case-insensitive, possibly preceded by newlines)
-    parts = re.split(r"\n\s*DATA:\s*\n", description, maxsplit=1, flags=re.IGNORECASE)
+    # Look for DATA: marker (case-insensitive, optionally markdown-bolded and
+    # preceded by a horizontal rule). Vision models vary this formatting.
+    parts = re.split(
+        r"\n\s*(?:---+\s*\n)?\s*\*{0,2}DATA:\*{0,2}\s*\n",
+        description,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )
     prose = parts[0].strip()
     data_table = parts[1].strip() if len(parts) > 1 else ""
     return prose, data_table

@@ -70,19 +70,25 @@ except ImportError:
               help="Full multimodal: AI-describe charts, figures, and diagrams.")
 @click.option("--full-model", default=None,
               help="Vision model for --full (default: pixtral-large-latest).")
+@click.option("--mistral-url", default=None,
+              help="Custom Mistral-compatible server URL, e.g. a local vLLM "
+                   "instance (overrides MISTRAL_BASE_URL).")
 @click.option("--enhance", "enhance_md", type=click.Path(exists=True), default=None,
               help="Enhance an existing markdown file.")
 @click.option("--model", default=None, help="OCR model override (default: mistral-ocr-latest).")
 @click.option("--chunks", is_flag=True, help="Also produce chunked JSONL output.")
 @click.option("--chunk-size", type=int, default=1024,
               help="Max tokens per chunk (default: 1024).")
-@click.option("--chunker", type=click.Choice(["recursive", "semantic", "sentence"]),
+@click.option("--chunker", type=click.Choice(["recursive", "semantic", "sentence", "hierarchical"]),
               default="recursive", help="Chunking strategy (default: recursive).")
 @click.option("--index", "index_name", default=None,
               help="Add to a named search index (implies --chunks).")
 @click.option("--index-path", type=click.Path(), default=None,
               help="Custom path for the index database (e.g. ./cti.db).")
 @click.option("--no-clean", is_flag=True, help="Skip post-OCR cleanup.")
+@click.option("--preserve-pages", is_flag=True,
+              help="Inject page markers so chunks carry page_start/page_end "
+                   "metadata for page-level citations.")
 @click.option("--force", is_flag=True, help="Re-process even if already converted.")
 @click.option("--verbose", is_flag=True, help="Show detailed progress.")
 @click.option("--batch", is_flag=True,
@@ -91,8 +97,8 @@ except ImportError:
               help="Exclude PDFs whose filename contains this text (repeatable).")
 def cancel(
     path, output_dir, images, embed_images, plaintext, full, full_model,
-    enhance_md, model, chunks, chunk_size, chunker, index_name, index_path,
-    no_clean, force, verbose, batch, exclude,
+    mistral_url, enhance_md, model, chunks, chunk_size, chunker, index_name,
+    index_path, no_clean, preserve_pages, force, verbose, batch, exclude,
 ):
     """Cancel PDFs — convert to clean markdown.
 
@@ -110,6 +116,8 @@ def cancel(
         settings.ocr_model = model
     if full_model:
         settings.multimodal_model = full_model
+    if mistral_url:
+        settings.mistral_base_url = mistral_url
 
     # --index implies --chunks; set custom index path if provided
     if index_name:
@@ -145,45 +153,67 @@ def cancel(
 
     if batch and len(pdf_paths) > 1:
         # Batch pipeline: upload all → batch OCR → batch vision → local post-process
-        results = convert_batch_pipeline(
+        pairs = convert_batch_pipeline(
             pdf_paths, settings,
             output_dir=out, plaintext=plaintext, extract_images=images,
             embed_images=embed_images, full=full, force=force,
             no_clean=no_clean, produce_chunks=chunks,
             chunk_size=chunk_size, chunker_type=chunker, verbose=verbose,
+            preserve_pages=preserve_pages,
         )
-        if index_name:
-            for res_path in results:
-                # Find matching PDF by stem
-                pdf_match = next(
-                    (p for p in pdf_paths if p.stem == res_path.stem), None
-                )
-                if pdf_match:
-                    _index_file(res_path, pdf_match.name, index_name, chunk_size, chunker)
-        console.print(f"\n[green]Cancelled {len(results)} PDF(s) via batch.[/green]")
+        _finish_multi(pairs, index_name, chunk_size, chunker, via=" via batch")
     elif len(pdf_paths) == 1:
-        result = convert_single(
-            pdf_paths[0], settings,
-            output_dir=out, plaintext=plaintext, extract_images=images,
-            embed_images=embed_images, full=full, force=force,
-            no_clean=no_clean, produce_chunks=chunks,
-            chunk_size=chunk_size, chunker_type=chunker,
-        )
+        from pdfcancel.validate import OcrValidationError
+        try:
+            result = convert_single(
+                pdf_paths[0], settings,
+                output_dir=out, plaintext=plaintext, extract_images=images,
+                embed_images=embed_images, full=full, force=force,
+                no_clean=no_clean, produce_chunks=chunks,
+                chunk_size=chunk_size, chunker_type=chunker,
+                preserve_pages=preserve_pages,
+            )
+        except OcrValidationError as e:
+            console.print(f"\n[red]Error:[/red] {e}")
+            raise SystemExit(1)
         if index_name:
             _index_file(result, pdf_paths[0].name, index_name, chunk_size, chunker)
         console.print(f"\n[green]Cancelled.[/green] → {result}")
     else:
-        results = convert_batch(
+        pairs = convert_batch(
             pdf_paths, settings,
             output_dir=out, plaintext=plaintext, extract_images=images,
             embed_images=embed_images, full=full, force=force,
             no_clean=no_clean, produce_chunks=chunks,
             chunk_size=chunk_size, chunker_type=chunker, verbose=verbose,
+            preserve_pages=preserve_pages,
         )
-        if index_name:
-            for res_path, pdf_path in zip(results, pdf_paths):
-                _index_file(res_path, pdf_path.name, index_name, chunk_size, chunker)
-        console.print(f"\n[green]Cancelled {len(results)} PDF(s).[/green]")
+        _finish_multi(pairs, index_name, chunk_size, chunker)
+
+
+def _finish_multi(
+    pairs: list[tuple[Path, Path | None]],
+    index_name: str | None,
+    chunk_size: int,
+    chunker: str,
+    *,
+    via: str = "",
+) -> None:
+    """Index successful conversions and exit non-zero if any file failed."""
+    successes = [(pdf, res) for pdf, res in pairs if res is not None]
+    failures = [pdf for pdf, res in pairs if res is None]
+
+    if index_name:
+        for pdf_path, res_path in successes:
+            _index_file(res_path, pdf_path.name, index_name, chunk_size, chunker)
+
+    console.print(f"\n[green]Cancelled {len(successes)} PDF(s){via}.[/green]")
+    if failures:
+        console.print(
+            f"[red]{len(failures)} PDF(s) failed:[/red] "
+            + ", ".join(p.name for p in failures)
+        )
+        raise SystemExit(1)
 
 
 def _index_file(
@@ -249,11 +279,22 @@ def search(index_name, query, top_k, mode, context, index_path):
         section = r.get("section", "")
         doc_title = r.get("doc_title", "")
 
-        # Header line with score, method, content type, source
+        # Page citation (available when indexed with --preserve-pages)
+        page_start = r.get("page_start")
+        page_end = r.get("page_end")
+        if page_start is not None:
+            if page_end is not None and page_end != page_start:
+                page_tag = f" [magenta]pp. {page_start}–{page_end}[/magenta]"
+            else:
+                page_tag = f" [magenta]p. {page_start}[/magenta]"
+        else:
+            page_tag = ""
+
+        # Header line with score, method, content type, source, page
         type_tag = f" [{content_type}]" if content_type and content_type != "prose" else ""
         console.print(
             f"[bold cyan]#{i}[/bold cyan] [green]{w_score}[/green] "
-            f"[{method}]{type_tag}  [dim]{source}[/dim]"
+            f"[{method}]{type_tag}  [dim]{source}[/dim]{page_tag}"
         )
         if doc_title and doc_title != source:
             console.print(f"   [dim]┃ {doc_title}[/dim]")
@@ -275,6 +316,10 @@ def search(index_name, query, top_k, mode, context, index_path):
         if context and r.get("context_after"):
             ctx = r["context_after"][:120].replace("\n", " ").strip()
             console.print(f"   [dim]└ {ctx}...[/dim]")
+
+        if context and r.get("figure_context"):
+            ctx = r["figure_context"][:160].replace("\n", " ").strip()
+            console.print(f"   [dim]▣ {ctx}...[/dim]")
 
         console.print()
 

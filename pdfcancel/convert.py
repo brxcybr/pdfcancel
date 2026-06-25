@@ -104,14 +104,18 @@ def convert_single(
     produce_chunks: bool = False,
     chunk_size: int = 1024,
     chunker_type: str = "recursive",
+    preserve_pages: bool = False,
 ) -> Path:
     """Convert a single PDF to markdown (or plaintext).
 
     Returns the path to the output file.
+
+    Raises:
+        OcrValidationError: When OCR output fails validation; no output
+            file is written.
     """
     from pdfcancel.clean import clean_markdown
-    from pdfcancel.images import process_images
-
+    from pdfcancel.validate import validate_ocr_result
     settings.require_api_key()
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -129,17 +133,43 @@ def convert_single(
 
     console.print(f"  [bold]Cancelling[/bold] {pdf_path.name} ...")
 
-    if full:
-        # Use mistralai SDK directly to get both text and image base64 data
+    # The direct SDK path is required whenever we need per-page content
+    # (--preserve-pages) or image base64 data (--full / --images /
+    # --embed-images). The Chonkie path only returns joined text.
+    use_sdk = full or preserve_pages or extract_images or embed_images
+    ocr_page_count: int | None = None
+
+    if use_sdk:
+        # Use mistralai SDK directly to get text, page list, and image data
         from pdfcancel.images import ocr_with_images
-        markdown_content, raw_images = ocr_with_images(pdf_path, settings)
+        ocr_result = ocr_with_images(
+            pdf_path, settings, preserve_pages=preserve_pages,
+        )
+        markdown_content = ocr_result.markdown
+        raw_images = ocr_result.images
+        ocr_page_count = ocr_result.page_count
     else:
-        # Standard path: Chonkie MistralOCR (no image data)
+        # Standard path: Chonkie MistralOCR (no image data, joined text only)
         from chonkie import MistralOCR
+
+        from pdfcancel.retry import with_retry
         ocr = MistralOCR(model=settings.ocr_model, api_key=settings.mistral_api_key)
-        doc = ocr.process(str(pdf_path))
+        if settings.mistral_base_url:
+            # Chonkie builds its own client without a URL override; repoint
+            # it at the custom server (e.g. a local vLLM instance).
+            ocr.client = settings.build_client()
+        doc = with_retry(
+            lambda: ocr.process(str(pdf_path)),
+            description=f"OCR of {pdf_path.name}",
+        )
         markdown_content = doc.content
         raw_images = {}
+
+    # Validate OCR output before writing anything
+    for warning in validate_ocr_result(
+        pdf_path, markdown_content, ocr_page_count=ocr_page_count,
+    ):
+        console.print(f"  [yellow]Warning: {warning}[/yellow]")
 
     # Handle images (extract to disk / embed as base64)
     if extract_images or embed_images:
@@ -237,9 +267,14 @@ def convert_batch(
     chunk_size: int = 1024,
     chunker_type: str = "recursive",
     verbose: bool = False,
-) -> list[Path]:
-    """Convert multiple PDFs, with progress display."""
-    results = []
+    preserve_pages: bool = False,
+) -> list[tuple[Path, Path | None]]:
+    """Convert multiple PDFs, with progress display.
+
+    Returns a list of (pdf_path, output_path_or_None) pairs in input order;
+    None marks a failed conversion so callers never misalign results.
+    """
+    results: list[tuple[Path, Path | None]] = []
     total = len(pdf_paths)
     failed = 0
 
@@ -261,12 +296,14 @@ def convert_batch(
                 produce_chunks=produce_chunks,
                 chunk_size=chunk_size,
                 chunker_type=chunker_type,
+                preserve_pages=preserve_pages,
             )
-            results.append(out)
+            results.append((pdf_path, out))
             if verbose:
                 console.print(f"  [green]✓[/green] {pdf_path.name} → {out.name}")
         except Exception as e:
             failed += 1
+            results.append((pdf_path, None))
             console.print(f"  [red]✗[/red] {pdf_path.name}: {e}")
 
     if failed:
@@ -290,19 +327,24 @@ def convert_batch_pipeline(
     chunk_size: int = 1024,
     chunker_type: str = "recursive",
     verbose: bool = False,
-) -> list[Path]:
+    preserve_pages: bool = False,
+) -> list[tuple[Path, Path | None]]:
     """Convert multiple PDFs using the Mistral Batch API for 50% cost savings.
 
     Uploads all PDFs, submits batch OCR, optionally batch vision for --full,
     then performs local cleanup, description injection, chunking, and output.
+
+    Returns a list of (pdf_path, output_path_or_None) pairs; None marks a
+    PDF that failed (upload, OCR, validation, or post-processing).
     """
-    from pdfcancel.batch import batch_ocr, batch_vision, BatchResult
+    from pdfcancel.batch import batch_ocr, batch_vision
     from pdfcancel.clean import clean_markdown
     from pdfcancel.images import process_images_from_raw
     from pdfcancel.multimodal import (
         build_batch_vision_requests,
         inject_descriptions,
     )
+    from pdfcancel.validate import validate_ocr_result
 
     settings.require_api_key()
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -310,7 +352,7 @@ def convert_batch_pipeline(
     # Filter already-processed PDFs unless --force
     manifest = load_manifest(output_dir)
     to_process = []
-    skipped = []
+    skipped: list[tuple[Path, Path | None]] = []
     for pdf_path in pdf_paths:
         pdf_hash = file_hash(pdf_path)
         stem = pdf_path.stem
@@ -322,7 +364,7 @@ def convert_batch_pipeline(
             and manifest[stem].get("hash") == pdf_hash
             and existing.exists()
         ):
-            skipped.append(existing)
+            skipped.append((pdf_path, existing))
             if verbose:
                 console.print(f"  [dim]Skipping {pdf_path.name} (unchanged)[/dim]")
         else:
@@ -340,12 +382,12 @@ def convert_batch_pipeline(
 
     # Step 1: Batch OCR
     ocr_results = batch_ocr(
-        to_process, settings, include_images=full,
+        to_process, settings, include_images=full, preserve_pages=preserve_pages,
     )
 
     if not ocr_results:
         console.print("[red]Batch OCR returned no results.[/red]")
-        return skipped
+        return skipped + [(p, None) for p in to_process]
 
     # Step 2: For --full, collect all vision requests across all PDFs
     all_vision_requests: list[dict] = []
@@ -371,8 +413,15 @@ def convert_batch_pipeline(
         vision_results = batch_vision(all_vision_requests, settings)
 
     # Step 3: Local post-processing per PDF
-    results: list[Path] = list(skipped)
+    results: list[tuple[Path, Path | None]] = list(skipped)
     failed = 0
+
+    # PDFs that never came back from the batch job count as failures
+    returned = {r.pdf_path for r in ocr_results}
+    for pdf_path in to_process:
+        if pdf_path not in returned:
+            failed += 1
+            results.append((pdf_path, None))
 
     for idx, result in enumerate(ocr_results, 1):
         pdf_path = result.pdf_path
@@ -385,6 +434,12 @@ def convert_batch_pipeline(
                 f"  [dim]({idx}/{len(ocr_results)})[/dim] "
                 f"[bold]Post-processing[/bold] {pdf_path.name}"
             )
+
+            # Validate OCR output before writing anything
+            for warning in validate_ocr_result(
+                pdf_path, markdown_content, ocr_page_count=result.page_count,
+            ):
+                console.print(f"  [yellow]Warning: {warning}[/yellow]")
 
             # Handle images (extract to disk / embed as base64)
             if extract_images or embed_images:
@@ -463,7 +518,7 @@ def convert_batch_pipeline(
             manifest[stem] = manifest_entry
             save_manifest(output_dir, manifest)
 
-            results.append(out_path)
+            results.append((pdf_path, out_path))
             if verbose:
                 console.print(
                     f"  [green]✓[/green] {pdf_path.name} → {out_path.name}"
@@ -471,6 +526,7 @@ def convert_batch_pipeline(
 
         except Exception as e:
             failed += 1
+            results.append((pdf_path, None))
             console.print(f"  [red]✗[/red] {pdf_path.name}: {e}")
 
     if failed:
