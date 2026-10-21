@@ -13,6 +13,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _normalize_base_url(url: str | None) -> str:
+    """Normalize a custom Mistral server URL for the mistralai SDK.
+
+    The SDK appends ``/v1/...`` to its base URL (and only strips a trailing
+    slash), so a configured value ending in ``/v1`` would be doubled into
+    ``/v1/v1/...``. We strip surrounding whitespace, trailing slashes, and a
+    single trailing ``/v1`` segment. A blank value normalizes to ``""``,
+    meaning "use the SDK's default hosted endpoint".
+    """
+    url = (url or "").strip().rstrip("/")
+    if url.endswith("/v1"):
+        url = url[: -len("/v1")].rstrip("/")
+    return url
+
+
 @dataclass
 class Settings:
     """Runtime settings resolved from env vars, CLI flags, and defaults."""
@@ -23,6 +38,12 @@ class Settings:
     )
     multimodal_model: str = field(
         default_factory=lambda: os.getenv("PDFCANCEL_MULTIMODAL_MODEL", "pixtral-large-latest")
+    )
+    mistral_base_url: str = field(
+        default_factory=lambda: _normalize_base_url(os.getenv("MISTRAL_BASE_URL", ""))
+    )
+    mistral_ca_bundle: str = field(
+        default_factory=lambda: os.getenv("MISTRAL_CA_BUNDLE", "")
     )
     output_dir: Path | None = None  # None means "same directory as input"
 
@@ -36,3 +57,40 @@ class Settings:
                 "Get a free key at https://console.mistral.ai"
             )
         return self.mistral_api_key
+
+    def build_client(self):
+        """Construct a Mistral SDK client, honoring a custom server URL.
+
+        Requires an API key. When ``mistral_base_url`` is set, the client is
+        pointed at that server (e.g. a local vLLM instance); otherwise the
+        SDK's default hosted endpoint is used.
+
+        When ``mistral_ca_bundle`` is set, TLS certificates are verified
+        against that CA bundle (e.g. an internal/self-hosted CA) instead of
+        the default trust store, without modifying any global trust store.
+        Verification always stays enabled; a missing bundle path is a hard
+        error rather than a silent fallback to an unverified connection.
+        """
+        from mistralai.client import Mistral
+
+        api_key = self.require_api_key()
+        kwargs: dict = {"api_key": api_key}
+
+        base_url = _normalize_base_url(self.mistral_base_url)
+        if base_url:
+            kwargs["server_url"] = base_url
+
+        ca_bundle = (self.mistral_ca_bundle or "").strip()
+        if ca_bundle:
+            if not Path(ca_bundle).exists():
+                raise SystemExit(
+                    f"Error: MISTRAL_CA_BUNDLE path does not exist: {ca_bundle}"
+                )
+            import httpx
+
+            # Verify against the provided CA bundle. This keeps verification
+            # ON and is scoped to this client only (no changes to certifi or
+            # the OS trust store). Mirror the SDK default follow_redirects.
+            kwargs["client"] = httpx.Client(verify=ca_bundle, follow_redirects=True)
+
+        return Mistral(**kwargs)

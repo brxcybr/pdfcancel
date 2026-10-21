@@ -12,6 +12,8 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from pdfcancel.pages import is_page_marker_line
+
 
 def clean_markdown(text: str) -> str:
     """Apply all cleanup passes to OCR markdown output.
@@ -198,8 +200,10 @@ def _strip_repeating_headers_footers(text: str) -> str:
         norm_count = normalized_counts.get(norm, 0)
         if count < min_count and norm_count < 3:
             continue
-        # Skip markdown structural elements
-        if line_text.startswith(("#", "-", "*", "|", ">", "```", "![", "[")):
+        # Skip markdown structural elements and HTML comments (incl. the
+        # pdfcancel page markers, which share a common 20-char prefix and
+        # would otherwise be grouped as a "repeating header")
+        if line_text.startswith(("#", "-", "*", "|", ">", "```", "![", "[", "<!--")):
             continue
         # Skip lines that are actual content (long prose paragraphs)
         if len(line_text) > 150:
@@ -285,11 +289,14 @@ def _rejoin_broken_sentences(text: str) -> str:
         line = lines[i]
         stripped = line.strip()
 
-        # If this line is blank, a heading, list item, table, or image — just keep it
+        # If this line is blank, a heading, list item, table, image, or a
+        # page marker comment — just keep it (markers must stay on their
+        # own line, never merged into a sentence)
         if (
             not stripped
             or stripped.startswith(("#", "-", "*", "|", ">", "```", "!["))
             or stripped.startswith(("(", "["))
+            or is_page_marker_line(stripped)
         ):
             result.append(line)
             i += 1

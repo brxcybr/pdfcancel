@@ -3,58 +3,120 @@
 from __future__ import annotations
 
 import base64
-import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from rich.console import Console
+
 from pdfcancel.config import Settings
+from pdfcancel.pages import join_pages
+from pdfcancel.retry import with_retry
+
+console = Console()
 
 
-def ocr_with_images(pdf_path: Path, settings: Settings) -> tuple[str, dict[str, bytes]]:
+@dataclass
+class OcrResult:
+    """Result of a direct-SDK OCR call."""
+
+    markdown: str
+    images: dict[str, bytes] = field(default_factory=dict)
+    page_markdowns: list[str] = field(default_factory=list)
+    dropped_images: int = 0
+
+    @property
+    def page_count(self) -> int:
+        return len(self.page_markdowns)
+
+
+def decode_page_images(
+    images: dict[str, bytes],
+    image_items: list[tuple[str, str]],
+) -> int:
+    """Decode (image_id, base64) pairs into `images`, returning the drop count.
+
+    Strips data-URI prefixes; entries that fail base64 decoding are counted
+    rather than silently discarded.
+    """
+    dropped = 0
+    for img_id, img_b64 in image_items:
+        if not img_id or not img_b64:
+            continue
+        if "," in img_b64:
+            img_b64 = img_b64.split(",", 1)[1]
+        try:
+            images[img_id] = base64.b64decode(img_b64)
+        except Exception:
+            dropped += 1
+    return dropped
+
+
+def ocr_with_images(
+    pdf_path: Path,
+    settings: Settings,
+    *,
+    preserve_pages: bool = False,
+) -> OcrResult:
     """Run Mistral OCR directly via the SDK with include_image_base64=True.
 
-    Returns (markdown_content, {image_id: raw_bytes}).
-    Used by --full mode to get both text and image data in a single API call.
+    Returns an OcrResult with markdown, image bytes, per-page markdown,
+    and the count of images dropped due to decode failures.
+    When preserve_pages is True, page markers are injected at join time.
     """
-    from mistralai.client import Mistral
-
-    client = Mistral(api_key=settings.require_api_key())
+    client = settings.build_client()
 
     # Upload PDF to Mistral for OCR
     with open(pdf_path, "rb") as f:
-        uploaded = client.files.upload(
-            file={"file_name": pdf_path.name, "content": f.read()},
+        content = f.read()
+    uploaded = with_retry(
+        lambda: client.files.upload(
+            file={"file_name": pdf_path.name, "content": content},
             purpose="ocr",
-        )
-    signed_url = client.files.get_signed_url(file_id=uploaded.id, expiry=1)
+        ),
+        description=f"upload of {pdf_path.name}",
+    )
+    signed_url = with_retry(
+        lambda: client.files.get_signed_url(file_id=uploaded.id, expiry=1),
+        description="signed URL request",
+    )
 
     # Run OCR with image extraction
     from mistralai.client.models import DocumentURLChunk
-    response = client.ocr.process(
-        document=DocumentURLChunk(document_url=signed_url.url),
-        model=settings.ocr_model,
-        include_image_base64=True,
+    response = with_retry(
+        lambda: client.ocr.process(
+            document=DocumentURLChunk(document_url=signed_url.url),
+            model=settings.ocr_model,
+            include_image_base64=True,
+        ),
+        description=f"OCR of {pdf_path.name}",
     )
 
     # Assemble markdown from all pages
-    markdown_parts = []
+    page_markdowns: list[str] = []
     images: dict[str, bytes] = {}
+    dropped = 0
 
     for page in response.pages:
-        markdown_parts.append(page.markdown)
-        for img in page.images:
-            if img.id and img.image_base64:
-                b64_data = img.image_base64
-                # Strip data URI prefix if present
-                if "," in b64_data:
-                    b64_data = b64_data.split(",", 1)[1]
-                try:
-                    images[img.id] = base64.b64decode(b64_data)
-                except Exception:
-                    pass
+        page_markdowns.append(page.markdown)
+        dropped += decode_page_images(
+            images,
+            [(img.id, img.image_base64) for img in page.images],
+        )
 
-    markdown_content = "\n\n".join(markdown_parts)
-    return markdown_content, images
+    if dropped:
+        console.print(
+            f"  [yellow]Warning: {dropped} image(s) from {pdf_path.name} "
+            "could not be decoded and were dropped.[/yellow]"
+        )
+
+    markdown_content = join_pages(page_markdowns, preserve_pages=preserve_pages)
+    return OcrResult(
+        markdown=markdown_content,
+        images=images,
+        page_markdowns=page_markdowns,
+        dropped_images=dropped,
+    )
 
 
 def process_images_from_raw(
@@ -132,18 +194,18 @@ def _collect_images(doc: Any) -> dict[str, bytes]:
     # or we can access it from the raw response if available.
     raw_response = metadata.get("raw_response") or metadata.get("response")
     if raw_response and hasattr(raw_response, "pages"):
+        dropped = 0
         for page in raw_response.pages:
-            for img in getattr(page, "images", []):
-                img_id = getattr(img, "id", None)
-                img_b64 = getattr(img, "image_base64", None)
-                if img_id and img_b64:
-                    # Strip data URI prefix if present
-                    if "," in img_b64:
-                        img_b64 = img_b64.split(",", 1)[1]
-                    try:
-                        images[img_id] = base64.b64decode(img_b64)
-                    except Exception:
-                        pass
+            items = [
+                (getattr(img, "id", ""), getattr(img, "image_base64", ""))
+                for img in getattr(page, "images", [])
+            ]
+            dropped += decode_page_images(images, items)
+        if dropped:
+            console.print(
+                f"  [yellow]Warning: {dropped} image(s) could not be decoded "
+                "and were dropped.[/yellow]"
+            )
 
     return images
 

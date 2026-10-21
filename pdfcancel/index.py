@@ -65,7 +65,11 @@ def _init_db(conn: sqlite3.Connection) -> None:
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source TEXT NOT NULL,
             chunk_index INTEGER NOT NULL,
+            chunk_id TEXT,
+            parent_id TEXT,
             section TEXT,
+            section_path TEXT,
+            content_type TEXT,
             text TEXT NOT NULL,
             token_count INTEGER,
             embedding BLOB,
@@ -94,6 +98,25 @@ def _init_db(conn: sqlite3.Connection) -> None:
             chunk_count INTEGER
         );
     """)
+    _ensure_column(conn, "chunks", "chunk_id", "TEXT")
+    _ensure_column(conn, "chunks", "parent_id", "TEXT")
+    _ensure_column(conn, "chunks", "section_path", "TEXT")
+    _ensure_column(conn, "chunks", "content_type", "TEXT")
+    # Page citation columns (--preserve-pages); added via ALTER so old
+    # databases keep working (values stay NULL for legacy rows)
+    _ensure_column(conn, "chunks", "page_start", "INTEGER")
+    _ensure_column(conn, "chunks", "page_end", "INTEGER")
+
+
+def _ensure_column(
+    conn: sqlite3.Connection,
+    table: str,
+    column: str,
+    col_type: str,
+) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
 
 def ingest_chunks(
@@ -128,16 +151,25 @@ def ingest_chunks(
     for chunk, emb in zip(chunks, embeddings):
         meta = chunk.get("metadata", {})
         conn.execute(
-            """INSERT INTO chunks (source, chunk_index, section, text, token_count, embedding, metadata)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO chunks
+               (source, chunk_index, chunk_id, parent_id, section, section_path,
+                content_type, text, token_count, embedding, metadata,
+                page_start, page_end)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 source_file,
                 meta.get("chunk_index", 0),
+                meta.get("chunk_id", ""),
+                meta.get("parent_id", ""),
                 meta.get("section", ""),
+                meta.get("section_path", meta.get("section", "")),
+                meta.get("content_type", "prose"),
                 chunk["text"],
                 meta.get("token_count", 0),
                 emb.astype(np.float32).tobytes(),
                 json.dumps(meta, ensure_ascii=False),
+                meta.get("page_start"),
+                meta.get("page_end"),
             ),
         )
 
@@ -164,6 +196,46 @@ _CONTENT_TYPE_WEIGHTS: dict[str, float] = {
     "frontmatter": 0.7,
     "references": 0.5,
 }
+
+# Reciprocal rank fusion constant (standard value from the RRF paper).
+_RRF_K = 60
+
+
+def _rrf_merge(
+    result_lists: list[list[dict[str, Any]]],
+    k: int = _RRF_K,
+) -> list[dict[str, Any]]:
+    """Merge ranked result lists with reciprocal rank fusion.
+
+    Each result contributes 1 / (k + rank) per list it appears in (rank is
+    1-based within its list). BM25 and cosine scores are never compared
+    directly — only ranks matter. Results found by multiple methods get
+    their methods joined (e.g. "text+semantic").
+
+    Input lists must already be sorted best-first. Returns merged results
+    with "score" set to the RRF score, sorted descending.
+    """
+    merged: dict[Any, dict[str, Any]] = {}
+    scores: dict[Any, float] = {}
+
+    for results in result_lists:
+        for rank, r in enumerate(results, 1):
+            rid = r["id"]
+            scores[rid] = scores.get(rid, 0.0) + 1.0 / (k + rank)
+            if rid in merged:
+                existing = merged[rid]
+                methods = existing["method"].split("+")
+                if r["method"] not in methods:
+                    existing["method"] = "+".join(methods + [r["method"]])
+            else:
+                merged[rid] = dict(r)
+
+    out = []
+    for rid, r in merged.items():
+        r["score"] = scores[rid]
+        out.append(r)
+    out.sort(key=lambda x: x["score"], reverse=True)
+    return out
 
 
 def search(
@@ -194,29 +266,25 @@ def search(
     conn = sqlite3.connect(str(db_path))
     _init_db(conn)
 
-    results = []
-
-    if mode in ("text", "hybrid"):
-        results.extend(_search_fts(conn, query, top_k * 2))
-
-    if mode in ("semantic", "hybrid"):
-        results.extend(_search_semantic(conn, query, top_k * 2))
-
-    # Deduplicate by chunk id, keep highest score
-    seen: dict[int, dict] = {}
-    for r in results:
-        rid = r["id"]
-        if rid not in seen or r["score"] > seen[rid]["score"]:
-            seen[rid] = r
+    if mode == "hybrid":
+        # Reciprocal rank fusion: BM25 ranks and cosine-similarity ranks
+        # are fused positionally (raw scores live on different scales)
+        fts_results = _search_fts(conn, query, top_k * 2)
+        sem_results = _search_semantic(conn, query, top_k * 2)
+        candidates = _rrf_merge([fts_results, sem_results])
+    elif mode == "text":
+        candidates = _search_fts(conn, query, top_k * 2)
+    else:
+        candidates = _search_semantic(conn, query, top_k * 2)
 
     # Apply content-type weighting
-    for r in seen.values():
+    for r in candidates:
         content_type = r.get("content_type", "prose")
         weight = _CONTENT_TYPE_WEIGHTS.get(content_type, 1.0)
         r["weighted_score"] = r["score"] * weight
 
     # Sort by weighted score descending, take top_k
-    ranked = sorted(seen.values(), key=lambda x: x["weighted_score"], reverse=True)
+    ranked = sorted(candidates, key=lambda x: x["weighted_score"], reverse=True)
     ranked = ranked[:top_k]
 
     # Context expansion: fetch neighboring chunks for each result
@@ -231,14 +299,15 @@ def _expand_context(
     conn: sqlite3.Connection,
     results: list[dict[str, Any]],
 ) -> None:
-    """Fetch the chunk immediately before and after each result.
+    """Fetch neighboring and same-section context for each result.
 
-    Adds 'context_before' and 'context_after' text fields to each result.
-    Only fetches neighbors from the same source document.
+    Adds linear neighbors for all indexes. For hierarchical indexes, also adds
+    same-section sibling snippets and figure chunks attached to the same parent.
     """
     for r in results:
         source = r["source"]
         chunk_idx = r.get("chunk_index", -1)
+        parent_id = r.get("parent_id") or ""
 
         # If we don't have chunk_index, try to get it from the DB
         if chunk_idx < 0:
@@ -261,6 +330,29 @@ def _expand_context(
             (source, chunk_idx + 1),
         ).fetchone()
         r["context_after"] = nxt[0] if nxt else ""
+
+        if not parent_id:
+            r["section_context"] = ""
+            r["figure_context"] = ""
+            continue
+
+        section_rows = conn.execute(
+            """SELECT text FROM chunks
+               WHERE source = ? AND parent_id = ? AND id != ?
+               ORDER BY ABS(chunk_index - ?), chunk_index
+               LIMIT 4""",
+            (source, parent_id, r["id"], chunk_idx),
+        ).fetchall()
+        r["section_context"] = "\n\n".join(row[0] for row in section_rows)
+
+        figure_rows = conn.execute(
+            """SELECT text FROM chunks
+               WHERE source = ? AND parent_id = ? AND content_type = 'figure'
+               ORDER BY chunk_index
+               LIMIT 3""",
+            (source, parent_id),
+        ).fetchall()
+        r["figure_context"] = "\n\n".join(row[0] for row in figure_rows)
 
 
 def list_indexes() -> list[dict[str, Any]]:
@@ -289,6 +381,19 @@ def list_indexes() -> list[dict[str, Any]]:
     return indexes
 
 
+def _escape_fts_query(query: str) -> str:
+    """Escape a user query for FTS5 MATCH.
+
+    Each whitespace-separated term is wrapped in double quotes (with embedded
+    quotes doubled) so FTS5 operators and special characters like -, :, *,
+    or & cannot break the MATCH expression.
+    """
+    terms = query.split()
+    if not terms:
+        return '""'
+    return " ".join('"' + term.replace('"', '""') + '"' for term in terms)
+
+
 def _search_fts(
     conn: sqlite3.Connection,
     query: str,
@@ -297,13 +402,15 @@ def _search_fts(
     """Full-text search using SQLite FTS5 with BM25 ranking."""
     rows = conn.execute(
         """SELECT c.id, c.text, c.source, c.section, c.token_count,
-                  c.chunk_index, c.metadata, rank * -1 as score
+                  c.chunk_index, c.metadata, c.chunk_id, c.parent_id,
+                  c.section_path, c.content_type, rank * -1 as score,
+                  c.page_start, c.page_end
            FROM chunks_fts fts
            JOIN chunks c ON c.id = fts.rowid
            WHERE chunks_fts MATCH ?
            ORDER BY rank
            LIMIT ?""",
-        (query, top_k),
+        (_escape_fts_query(query), top_k),
     ).fetchall()
 
     results = []
@@ -316,11 +423,19 @@ def _search_fts(
             "section": r[3],
             "token_count": r[4],
             "chunk_index": r[5],
-            "content_type": meta.get("content_type", "prose"),
             "doc_title": meta.get("doc_title", ""),
             "doc_author": meta.get("doc_author", ""),
             "doc_year": meta.get("doc_year", ""),
-            "score": r[7],
+            "chunk_id": r[7] or meta.get("chunk_id", ""),
+            "parent_id": r[8] or meta.get("parent_id", ""),
+            "section_path": r[9] or meta.get("section_path", r[3] or ""),
+            "content_type": r[10] or meta.get("content_type", "prose"),
+            "has_structured_chart_data": meta.get("has_structured_chart_data", False),
+            "chart_data": meta.get("chart_data"),
+            "vega_lite_spec": meta.get("vega_lite_spec"),
+            "page_start": r[12] if r[12] is not None else meta.get("page_start"),
+            "page_end": r[13] if r[13] is not None else meta.get("page_end"),
+            "score": r[11],
             "method": "text",
         })
     return results
@@ -337,7 +452,10 @@ def _search_semantic(
 
     # Load all embeddings (fine for <100k chunks; for larger, use a vector DB)
     rows = conn.execute(
-        "SELECT id, text, source, section, token_count, chunk_index, metadata, embedding FROM chunks"
+        """SELECT id, text, source, section, token_count, chunk_index, metadata,
+                  embedding, chunk_id, parent_id, section_path, content_type,
+                  page_start, page_end
+           FROM chunks"""
     ).fetchall()
 
     if not rows:
@@ -357,10 +475,18 @@ def _search_semantic(
             "section": row[3],
             "token_count": row[4],
             "chunk_index": row[5],
-            "content_type": meta.get("content_type", "prose"),
             "doc_title": meta.get("doc_title", ""),
             "doc_author": meta.get("doc_author", ""),
             "doc_year": meta.get("doc_year", ""),
+            "chunk_id": row[8] or meta.get("chunk_id", ""),
+            "parent_id": row[9] or meta.get("parent_id", ""),
+            "section_path": row[10] or meta.get("section_path", row[3] or ""),
+            "content_type": row[11] or meta.get("content_type", "prose"),
+            "has_structured_chart_data": meta.get("has_structured_chart_data", False),
+            "chart_data": meta.get("chart_data"),
+            "vega_lite_spec": meta.get("vega_lite_spec"),
+            "page_start": row[12] if row[12] is not None else meta.get("page_start"),
+            "page_end": row[13] if row[13] is not None else meta.get("page_end"),
             "score": similarity,
             "method": "semantic",
         })

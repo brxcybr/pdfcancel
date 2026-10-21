@@ -11,10 +11,22 @@ content_type).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from pathlib import Path
 from typing import Any
+
+from rich.console import Console
+
+from pdfcancel.charts import extract_chart_metadata
+from pdfcancel.pages import (
+    build_page_index,
+    page_range_for_span,
+    strip_page_markers,
+)
+
+console = Console()
 
 
 # ---------------------------------------------------------------------------
@@ -36,13 +48,14 @@ from typing import Any
 _FIGURE_BLOCK_RE = re.compile(
     r"("
     r"!\[[^\]]*\]\([^)]+\)"                  # image reference
-    r"(?:\n> \*\*Figure description:\*\* [^\n]+)?"  # optional description
+    r"(?:\n>.*)*"                             # optional description/data blockquote
     r"(?:\n(?:Figure|Fig\.?)\s*\d*[^\n]*)?"    # optional caption
     r")",
     re.MULTILINE,
 )
 
 _SENTINEL_PREFIX = "\x00FIGBLOCK:"
+_SENTINEL_RE = re.compile(r"\x00FIGBLOCK:\d+\x00")
 
 
 def _protect_figure_blocks(text: str) -> tuple[str, dict[str, str]]:
@@ -75,6 +88,14 @@ def _restore_figure_blocks(text: str, blocks: dict[str, str]) -> str:
     return text
 
 
+def _clean_metadata_text(text: str) -> str:
+    """Remove protected-block sentinels and control chars from metadata strings."""
+    text = _SENTINEL_RE.sub("", text)
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", text)
+    text = re.sub(r"FIGBLOCK:\d+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def _classify_content(text: str) -> str:
     """Classify a chunk's content type based on heuristics."""
     stripped = text.strip()
@@ -92,8 +113,11 @@ def _classify_content(text: str) -> str:
     if re.search(r"^#+ Abstract", stripped, re.MULTILINE | re.IGNORECASE):
         return "abstract"
     # Check if mostly table rows
-    lines = [l for l in stripped.split("\n") if l.strip()]
-    if lines and sum(1 for l in lines if l.strip().startswith("|")) > len(lines) * 0.5:
+    lines = [line for line in stripped.split("\n") if line.strip()]
+    if (
+        lines
+        and sum(1 for line in lines if line.strip().startswith("|")) > len(lines) * 0.5
+    ):
         return "table"
     return "prose"
 
@@ -205,11 +229,18 @@ def chunk_markdown(
         markdown_content: The cleaned markdown text.
         source_file: Original PDF filename for metadata.
         chunk_size: Maximum tokens per chunk.
-        chunker_type: One of "recursive", "semantic", "sentence".
+        chunker_type: One of "recursive", "semantic", "sentence", "hierarchical".
 
     Returns:
         List of chunk dicts with "text", "metadata" keys.
     """
+    if chunker_type == "hierarchical":
+        return _chunk_markdown_hierarchical(
+            markdown_content,
+            source_file=source_file,
+            chunk_size=chunk_size,
+        )
+
     # Extract document-level metadata once
     doc_meta = _extract_doc_metadata(markdown_content, source_file)
 
@@ -217,11 +248,15 @@ def chunk_markdown(
     protected_text, figure_blocks = _protect_figure_blocks(markdown_content)
 
     # Phase 2: Chunk the protected text
-    chunker = _create_chunker(chunker_type, chunk_size)
+    try:
+        chunker = _create_chunker(chunker_type, chunk_size)
+    except ImportError as e:
+        raise SystemExit(f"Error: {e}") from e
     raw_chunks = chunker(protected_text)
 
     # Phase 3: Restore figure blocks and build metadata
     heading_index = _build_heading_index(markdown_content)
+    page_index = build_page_index(protected_text)
 
     results = []
     for idx, chunk in enumerate(raw_chunks):
@@ -231,9 +266,22 @@ def chunk_markdown(
         # Map back to original position for section lookup
         section = _section_at_offset(heading_index, chunk.start_index)
 
+        # Page tracking (--preserve-pages): record the page range covered
+        # by this chunk, then strip the marker comments from the text
+        page_start, page_end = page_range_for_span(
+            page_index, chunk.start_index, chunk.end_index,
+        )
+        text = strip_page_markers(text)
+
         # Classify content type
         content_type = _classify_content(text)
+        chart_meta = extract_chart_metadata(text)
 
+        page_meta = (
+            {"page_start": page_start, "page_end": page_end}
+            if page_start is not None
+            else {}
+        )
         results.append({
             "text": text,
             "metadata": {
@@ -245,7 +293,9 @@ def chunk_markdown(
                 "token_count": chunk.token_count,
                 "start_index": chunk.start_index,
                 "end_index": chunk.end_index,
+                **page_meta,
                 **doc_meta,
+                **chart_meta,
             },
         })
 
@@ -273,11 +323,11 @@ def _create_chunker(chunker_type: str, chunk_size: int) -> Any:
     elif chunker_type == "semantic":
         try:
             from chonkie import SemanticChunker
-        except ImportError:
-            raise SystemExit(
-                "Error: Semantic chunking requires chonkie[semantic].\n"
-                "  pip install 'chonkie[semantic]'"
-            )
+        except ImportError as e:
+            raise ImportError(
+                "Semantic chunking requires the optional chonkie[semantic] extra.\n"
+                '  pip install "pdfcancel[chunking]"'
+            ) from e
         return SemanticChunker(chunk_size=chunk_size)
     elif chunker_type == "sentence":
         from chonkie import SentenceChunker
@@ -285,7 +335,7 @@ def _create_chunker(chunker_type: str, chunk_size: int) -> Any:
     else:
         raise SystemExit(
             f"Error: Unknown chunker type '{chunker_type}'.\n"
-            "  Supported: recursive, semantic, sentence"
+            "  Supported: recursive, semantic, sentence, hierarchical"
         )
 
 
@@ -333,3 +383,142 @@ def _section_at_offset(
 
     # Build breadcrumb from shallowest to deepest
     return " > ".join(active[k] for k in sorted(active.keys()))
+
+
+def _stable_id(source_file: str, *parts: object) -> str:
+    raw = "::".join([source_file, *(str(p) for p in parts)])
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _heading_slug(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    return slug or "section"
+
+
+def _section_blocks(text: str) -> list[dict[str, Any]]:
+    headings = _build_heading_index(text)
+    if not headings:
+        return [
+            {
+                "start": 0,
+                "end": len(text),
+                "level": 0,
+                "title": "",
+                "path": "",
+                "path_ids": [],
+            }
+        ]
+
+    blocks: list[dict[str, Any]] = []
+    active_titles: dict[int, str] = {}
+    active_ids: dict[int, str] = {}
+
+    for idx, (start, level, title) in enumerate(headings):
+        end = headings[idx + 1][0] if idx + 1 < len(headings) else len(text)
+        clean_title = _clean_metadata_text(title)
+        active_titles[level] = clean_title
+        active_ids[level] = _heading_slug(clean_title)
+        for deeper in list(active_titles):
+            if deeper > level:
+                del active_titles[deeper]
+                del active_ids[deeper]
+        ordered_levels = sorted(k for k in active_titles if k <= level)
+        blocks.append(
+            {
+                "start": start,
+                "end": end,
+                "level": level,
+                "title": clean_title,
+                "path": " > ".join(active_titles[k] for k in ordered_levels),
+                "path_ids": [active_ids[k] for k in ordered_levels],
+            }
+        )
+    return blocks
+
+
+def _chunk_markdown_hierarchical(
+    markdown_content: str,
+    *,
+    source_file: str,
+    chunk_size: int,
+) -> list[dict[str, Any]]:
+    doc_meta = _extract_doc_metadata(markdown_content, source_file)
+    protected_text, figure_blocks = _protect_figure_blocks(markdown_content)
+    try:
+        chunker = _create_chunker("semantic", chunk_size)
+    except ImportError as e:
+        console.print(
+            f"  [yellow]Warning: {e}[/yellow]\n"
+            "  [yellow]Falling back to recursive chunking for hierarchical "
+            "mode.[/yellow]"
+        )
+        chunker = _create_chunker("recursive", chunk_size)
+    page_index = build_page_index(protected_text)
+
+    results: list[dict[str, Any]] = []
+    global_idx = 0
+    for section_idx, section in enumerate(_section_blocks(protected_text)):
+        section_text = protected_text[section["start"] : section["end"]].strip()
+        if not section_text:
+            continue
+        parent_id = _stable_id(source_file, "section", section_idx, section["path"])
+
+        raw_chunks = chunker(section_text)
+        section_child_ids: list[str] = []
+        start_result_idx = len(results)
+        for local_idx, chunk in enumerate(raw_chunks):
+            text = _restore_figure_blocks(chunk.text, figure_blocks)
+            abs_start = section["start"] + chunk.start_index
+            abs_end = section["start"] + chunk.end_index
+            page_start, page_end = page_range_for_span(
+                page_index, abs_start, abs_end,
+            )
+            text = strip_page_markers(text)
+            content_type = _classify_content(text)
+            chart_meta = extract_chart_metadata(text)
+            page_meta = (
+                {"page_start": page_start, "page_end": page_end}
+                if page_start is not None
+                else {}
+            )
+            chunk_id = _stable_id(source_file, parent_id, local_idx, chunk.start_index)
+            section_child_ids.append(chunk_id)
+            results.append(
+                {
+                    "text": text,
+                    "metadata": {
+                        "source": source_file,
+                        "chunk_index": global_idx,
+                        "chunk_id": chunk_id,
+                        "parent_id": parent_id,
+                        "section_id": parent_id,
+                        "section": section["path"],
+                        "section_path": section["path"],
+                        "section_level": section["level"],
+                        "section_title": section["title"],
+                        "section_index": section_idx,
+                        "section_chunk_index": local_idx,
+                        "section_chunk_count": len(raw_chunks),
+                        "section_path_ids": section["path_ids"],
+                        "content_type": content_type,
+                        "has_figure": content_type == "figure" or "![" in text,
+                        "token_count": chunk.token_count,
+                        "start_index": abs_start,
+                        "end_index": abs_end,
+                        "chunker_type": "hierarchical",
+                        **page_meta,
+                        **doc_meta,
+                        **chart_meta,
+                    },
+                }
+            )
+            global_idx += 1
+
+        for offset, child_id in enumerate(section_child_ids):
+            metadata = results[start_result_idx + offset]["metadata"]
+            metadata["previous_chunk_id"] = section_child_ids[offset - 1] if offset else ""
+            metadata["next_chunk_id"] = (
+                section_child_ids[offset + 1] if offset + 1 < len(section_child_ids) else ""
+            )
+
+    return results
