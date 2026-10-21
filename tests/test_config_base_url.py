@@ -71,3 +71,42 @@ def test_build_client_requires_api_key(monkeypatch):
     settings = Settings(mistral_api_key="", mistral_base_url="")
     with pytest.raises(SystemExit):
         settings.build_client()
+
+
+def test_settings_reads_ca_bundle_env(monkeypatch):
+    monkeypatch.setenv("MISTRAL_CA_BUNDLE", "/tmp/ca.pem")
+    assert Settings().mistral_ca_bundle == "/tmp/ca.pem"
+
+
+def test_build_client_uses_ca_bundle(monkeypatch, tmp_path):
+    captured = _patch_fake_client(monkeypatch)
+    ca = tmp_path / "ca.pem"
+    ca.write_text("dummy")
+
+    import httpx
+
+    httpx_kwargs: dict = {}
+
+    class FakeHttpxClient:
+        def __init__(self, **kwargs):
+            httpx_kwargs.update(kwargs)
+
+    monkeypatch.setattr(httpx, "Client", FakeHttpxClient)
+
+    settings = Settings(
+        mistral_api_key="key",
+        mistral_base_url="https://host/vllm-mistral/v1",
+        mistral_ca_bundle=str(ca),
+    )
+    settings.build_client()
+    assert httpx_kwargs.get("verify") == str(ca)
+    assert httpx_kwargs.get("follow_redirects") is True
+    assert "client" in captured
+    assert captured.get("server_url") == "https://host/vllm-mistral"
+
+
+def test_build_client_missing_ca_bundle_raises(monkeypatch):
+    _patch_fake_client(monkeypatch)
+    settings = Settings(mistral_api_key="key", mistral_ca_bundle="/no/such/ca.pem")
+    with pytest.raises(SystemExit):
+        settings.build_client()

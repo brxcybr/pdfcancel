@@ -154,9 +154,9 @@ def convert_single(
 
         from pdfcancel.retry import with_retry
         ocr = MistralOCR(model=settings.ocr_model, api_key=settings.mistral_api_key)
-        if settings.mistral_base_url:
-            # Chonkie builds its own client without a URL override; repoint
-            # it at the custom server (e.g. a local vLLM instance).
+        if settings.mistral_base_url or settings.mistral_ca_bundle:
+            # Chonkie builds its own client without URL/CA overrides; repoint
+            # it at our configured client (custom server and/or CA bundle).
             ocr.client = settings.build_client()
         doc = with_retry(
             lambda: ocr.process(str(pdf_path)),

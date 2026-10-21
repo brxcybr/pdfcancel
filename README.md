@@ -69,6 +69,7 @@ MISTRAL_API_KEY=your-key-here
 | `PDFCANCEL_OCR_MODEL` | `mistral-ocr-latest` | OCR model to use |
 | `PDFCANCEL_MULTIMODAL_MODEL` | `pixtral-large-latest` | Vision model for `--full` |
 | `MISTRAL_BASE_URL` | *(unset)* | Custom Mistral-compatible server URL (e.g. local vLLM); a trailing `/v1` is added automatically |
+| `MISTRAL_CA_BUNDLE` | *(unset)* | Path to a CA bundle (PEM) used to verify a self-hosted server's TLS certificate (e.g. an internal CA). Verification stays enabled |
 
 ### Self-hosted / local Mistral server
 
@@ -84,6 +85,18 @@ pdfcancel paper.pdf --enhance paper.md --full \
 - The URL is the server **root**; the SDK appends `/v1/...`, and a trailing `/v1` you include is stripped automatically (both `.../vllm-mistral` and `.../vllm-mistral/v1` work).
 - Set the served model name with `--full-model` (vision) and/or `--model` (OCR); local model IDs differ from the hosted defaults.
 - **Capability caveat:** an OpenAI-compatible server such as vLLM serves `--full` image descriptions (chat/vision) but typically does **not** implement Mistral's OCR, file-upload, or batch endpoints. The base PDF→markdown OCR step, `--images` / `--embed-images` / `--preserve-pages`, and `--batch` therefore still require Mistral's hosted API. To run `--full` entirely against a local server, use `--enhance` on documents that already have an extracted `<name>_images/` folder — pdfcancel describes those images in place without re-running OCR.
+
+**Internal / self-signed CA:** if the server's TLS certificate is issued by an internal CA that your default trust store doesn't include, point pdfcancel at a PEM bundle for that CA with `--mistral-ca-bundle` / `MISTRAL_CA_BUNDLE`. TLS verification stays **enabled**, and your system and `certifi` trust stores are left untouched (nothing is disabled or globally modified):
+
+```bash
+# Export an internal root you already trust (macOS keychain example):
+security find-certificate -a -c "Your Root CA name" -p \
+  /Library/Keychains/System.keychain > ~/your-internal-ca.pem
+export MISTRAL_CA_BUNDLE=~/your-internal-ca.pem
+pdfcancel paper.pdf --enhance paper.md --full \
+  --full-model mistralai/Mistral-Medium-3.5-128B \
+  --mistral-url https://your-host/vllm-mistral
+```
 
 ## Usage
 
@@ -289,6 +302,7 @@ Cancel options:
   --full                 AI-describe charts, figures, and diagrams
   --full-model MODEL     Vision model for --full
   --mistral-url URL      Custom Mistral-compatible server URL (local vLLM)
+  --mistral-ca-bundle PATH  CA bundle (PEM) to verify a self-hosted TLS cert
   --enhance FILE.md      Enhance an existing markdown file
   --model MODEL          OCR model override
   --chunks               Produce chunked JSONL for RAG/LLM
