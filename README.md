@@ -4,6 +4,8 @@ Cancel your PDFs — convert them to clean, structured markdown using [Mistral O
 
 Built on [Chonkie](https://docs.chonkie.ai) + [Mistral OCR](https://docs.mistral.ai/capabilities/document/) for high-fidelity document conversion with AI-powered image descriptions, semantic search, and Zotero integration.
 
+OCR runs on **Mistral** by default, or on **any OpenAI-compatible vision model** you host — a local vLLM instance, a LiteLLM proxy, Ollama, etc. — via `--ocr-engine vlm`, keeping large or sensitive documents on your own network.
+
 ## Why?
 
 Tools like `pdftotext` flatten PDFs into unstructured strings, losing all document hierarchy. `pdfcancel` produces **clean markdown** with:
@@ -30,6 +32,9 @@ pip install .
 
 # Install with indexing/search support
 pip install ".[indexing]"
+
+# Install with the local vlm OCR engine (PyMuPDF page rasterization)
+pip install ".[vlm]"
 ```
 
 > **Note:** After editing source code, run `make install` to reinstall.
@@ -70,6 +75,60 @@ MISTRAL_API_KEY=your-key-here
 | `PDFCANCEL_MULTIMODAL_MODEL` | `pixtral-large-latest` | Vision model for `--full` |
 | `MISTRAL_BASE_URL` | *(unset)* | Custom Mistral-compatible server URL (e.g. local vLLM); a trailing `/v1` is added automatically |
 | `MISTRAL_CA_BUNDLE` | *(unset)* | Path to a CA bundle (PEM) used to verify a self-hosted server's TLS certificate (e.g. an internal CA). Verification stays enabled |
+| `PDFCANCEL_OCR_ENGINE` | `mistral` | OCR engine: `mistral` (`/v1/ocr`) or `vlm` (OpenAI-compatible `/v1/chat/completions`) |
+| `PDFCANCEL_API_BASE` | *(unset)* | `vlm` engine server URL (e.g. a LiteLLM/vLLM endpoint); setting it implies the `vlm` engine. A trailing `/v1` is handled automatically |
+| `PDFCANCEL_API_KEY` | `EMPTY` | Bearer token for the `vlm` endpoint (vLLM accepts any value) |
+| `PDFCANCEL_VLM_MODEL` | *(unset)* | Model id for the `vlm` engine (required for a multi-model proxy) |
+| `PDFCANCEL_OCR_DPI` | `200` | `vlm` engine: page rasterization DPI |
+| `PDFCANCEL_OCR_CONCURRENCY` | `4` | `vlm` engine: concurrent page requests |
+
+### Choosing an OCR engine (`--ocr-engine`)
+
+pdfcancel has two interchangeable OCR engines:
+
+- **`mistral`** (default) — Mistral's dedicated OCR via `/v1/ocr`. Best turnkey quality; also powers `--full`, `--images`, and `--batch`.
+- **`vlm`** — any **OpenAI-compatible** vision model served at `/v1/chat/completions` (a local vLLM instance, a LiteLLM proxy, Ollama, OpenAI, or a dedicated OCR VLM). pdfcancel rasterizes each page and transcribes it to markdown, so nothing leaves your network — suitable for large or sensitive (e.g. CUI) documents.
+
+Point the `vlm` engine at your server with `--api-base` (this implies `--ocr-engine vlm`) and name the model with `--model`:
+
+```bash
+pdfcancel ./refs/ \
+  --api-base https://api.wirecui.westpoint.edu/litellm/v1 \
+  --model <gemma4-model-id> \
+  --chunks --preserve-pages \
+  --ca-bundle ~/your-internal-ca.pem
+```
+
+- **Recommended endpoint:** a LiteLLM proxy ("one API to rule them all") fronts every model behind a single OpenAI-compatible URL. Because a proxy exposes many models, you **must** name one with `--model` (or `PDFCANCEL_VLM_MODEL`); auto-detection only works when the endpoint serves exactly one model. Direct per-model URLs (e.g. `.../vllm-gemma4/v1`) work too.
+- **Auth:** most vLLM servers accept any token; the default is `EMPTY`. Override with `--api-key` / `PDFCANCEL_API_KEY` if your gateway requires one.
+- **Tuning:** `--ocr-dpi` (default 200) trades rasterization sharpness for tokens/latency; `--ocr-concurrency` (default 4) sets how many pages are transcribed in parallel.
+- **TLS:** the `vlm` engine reuses the shared CA bundle (`--ca-bundle` / `MISTRAL_CA_BUNDLE`) for internal/self-signed certificates — see below.
+- **Scope:** the `vlm` engine produces page markdown plus `--chunks` and `--preserve-pages`. Server-cropped figures (`--images` / `--embed-images`), figure descriptions (`--full`), and the Mistral Batch API (`--batch`) remain `mistral`-engine features; combining them with `--ocr-engine vlm` exits with a clear message.
+
+#### One-time setup for a self-hosted vlm endpoint
+
+1. **Trust the server's CA** (only if it uses an internal/private CA) so TLS verification stays on. Export the root (and any issuing/intermediate) CA to a PEM bundle:
+   ```bash
+   mkdir -p ~/.config/pdfcancel
+   security find-certificate -a -c "<Your Org> Root CA" -p \
+     /Library/Keychains/System.keychain > ~/.config/pdfcancel/org-ca.pem
+   # If the server presents an issuing/intermediate CA, append it too:
+   security find-certificate -a -c "<Your Org> Issuing CA" -p \
+     /Library/Keychains/System.keychain >> ~/.config/pdfcancel/org-ca.pem
+   ```
+   Publicly-trusted endpoints (DigiCert, Let's Encrypt, …) need no bundle.
+2. **Point pdfcancel at the endpoint** — put these in a local, git-ignored `.env` (or `export` them):
+   ```
+   PDFCANCEL_API_BASE=https://your-host/litellm/v1   # implies --ocr-engine vlm
+   PDFCANCEL_VLM_MODEL=<model-id>                     # required for a multi-model proxy
+   PDFCANCEL_API_KEY=EMPTY                            # or your gateway token
+   MISTRAL_CA_BUNDLE=~/.config/pdfcancel/org-ca.pem   # internal CA (shared by both engines)
+   ```
+   Discover the model id with `curl --cacert ~/.config/pdfcancel/org-ca.pem https://your-host/litellm/v1/models`.
+3. **Convert** — the engine auto-selects `vlm` when `PDFCANCEL_API_BASE` is set:
+   ```bash
+   pdfcancel ./docs/ --chunks --preserve-pages
+   ```
 
 ### Self-hosted / local Mistral server
 
@@ -303,6 +362,12 @@ Cancel options:
   --full-model MODEL     Vision model for --full
   --mistral-url URL      Custom Mistral-compatible server URL (local vLLM)
   --mistral-ca-bundle PATH  CA bundle (PEM) to verify a self-hosted TLS cert
+  --ocr-engine ENGINE    OCR engine: mistral (default) | vlm
+  --api-base URL         OpenAI-compatible server for the vlm engine (implies vlm)
+  --api-key TOKEN        Bearer token for the vlm endpoint (default: EMPTY)
+  --ca-bundle PATH       CA bundle (PEM) to verify a self-hosted TLS cert (either engine)
+  --ocr-dpi N            vlm: page rasterization DPI (default: 200)
+  --ocr-concurrency N    vlm: concurrent page requests (default: 4)
   --enhance FILE.md      Enhance an existing markdown file
   --model MODEL          OCR model override
   --chunks               Produce chunked JSONL for RAG/LLM
@@ -338,7 +403,8 @@ pdfcancel/
 │   ├── __init__.py      # Version
 │   ├── cli.py           # Click CLI with DefaultGroup routing
 │   ├── config.py        # Settings, env loading, API key validation
-│   ├── convert.py       # Core OCR pipeline
+│   ├── convert.py       # Core OCR pipeline (mistral + vlm routing)
+│   ├── llm.py           # OpenAI-compatible vlm engine (rasterize + transcribe)
 │   ├── clean.py         # Post-OCR cleanup (5 passes + classification)
 │   ├── images.py        # Image extraction + direct Mistral SDK
 │   ├── multimodal.py    # Context-enriched vision descriptions
@@ -364,6 +430,7 @@ pdfcancel/
 | `rich` | Terminal formatting and progress bars |
 | `python-dotenv` | `.env` file loading |
 | `pypdf` | Page-count validation of OCR output |
+| `pymupdf` | Page rasterization for the `vlm` OCR engine (optional: `pip install 'pdfcancel[vlm]'`) |
 | `model2vec` | Local embeddings for semantic search (optional) |
 | `numpy` | Cosine similarity for search (optional) |
 

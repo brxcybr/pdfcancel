@@ -28,6 +28,17 @@ def _normalize_base_url(url: str | None) -> str:
     return url
 
 
+def _int_env(name: str, default: int) -> int:
+    """Parse an int from an env var, falling back to default on absence/garbage."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw.strip())
+    except ValueError:
+        return default
+
+
 @dataclass
 class Settings:
     """Runtime settings resolved from env vars, CLI flags, and defaults."""
@@ -45,7 +56,43 @@ class Settings:
     mistral_ca_bundle: str = field(
         default_factory=lambda: os.getenv("MISTRAL_CA_BUNDLE", "")
     )
+
+    # OCR engine selection + generic OpenAI-compatible (vlm) provider.
+    ocr_engine: str = field(
+        default_factory=lambda: (
+            os.getenv("PDFCANCEL_OCR_ENGINE", "mistral").strip().lower() or "mistral"
+        )
+    )
+    api_base: str = field(
+        default_factory=lambda: _normalize_base_url(os.getenv("PDFCANCEL_API_BASE", ""))
+    )
+    api_key: str = field(
+        default_factory=lambda: os.getenv("PDFCANCEL_API_KEY", "EMPTY") or "EMPTY"
+    )
+    vlm_model: str = field(
+        default_factory=lambda: os.getenv("PDFCANCEL_VLM_MODEL", "").strip()
+    )
+    ocr_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_OCR_DPI", 200))
+    ocr_concurrency: int = field(
+        default_factory=lambda: _int_env("PDFCANCEL_OCR_CONCURRENCY", 4)
+    )
     output_dir: Path | None = None  # None means "same directory as input"
+
+    def __post_init__(self) -> None:
+        # Normalize a directly-assigned api_base, then infer the engine: an
+        # api_base configured via env without an explicit engine selects vlm.
+        self.api_base = _normalize_base_url(self.api_base)
+        if (
+            self.api_base
+            and self.ocr_engine == "mistral"
+            and not os.getenv("PDFCANCEL_OCR_ENGINE")
+        ):
+            self.ocr_engine = "vlm"
+        if self.ocr_engine not in ("mistral", "vlm"):
+            raise SystemExit(
+                f"Error: invalid OCR engine '{self.ocr_engine}'. "
+                "Use 'mistral' or 'vlm'."
+            )
 
     def require_api_key(self) -> str:
         """Return the API key or raise with a helpful message."""
@@ -94,3 +141,25 @@ class Settings:
             kwargs["client"] = httpx.Client(verify=ca_bundle, follow_redirects=True)
 
         return Mistral(**kwargs)
+
+    def build_vision_http_client(self):
+        """Construct an ``httpx.Client`` for OpenAI-compatible (vlm) calls.
+
+        TLS is verified against the shared CA bundle (``mistral_ca_bundle``)
+        when set — e.g. an internal/self-hosted root CA — scoped to this
+        client only, without touching any global trust store. Verification
+        always stays enabled; a missing bundle path is a hard error.
+        """
+        import httpx
+
+        verify: object = True
+        ca_bundle = (self.mistral_ca_bundle or "").strip()
+        if ca_bundle:
+            if not Path(ca_bundle).exists():
+                raise SystemExit(
+                    f"Error: CA bundle path does not exist: {ca_bundle}"
+                )
+            verify = ca_bundle
+        return httpx.Client(
+            verify=verify, follow_redirects=True, timeout=httpx.Timeout(180.0)
+        )

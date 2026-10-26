@@ -116,7 +116,8 @@ def convert_single(
     """
     from pdfcancel.clean import clean_markdown
     from pdfcancel.validate import validate_ocr_result
-    settings.require_api_key()
+    if settings.ocr_engine == "mistral":
+        settings.require_api_key()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Check manifest for skip-processing
@@ -139,7 +140,22 @@ def convert_single(
     use_sdk = full or preserve_pages or extract_images or embed_images
     ocr_page_count: int | None = None
 
-    if use_sdk:
+    if settings.ocr_engine == "vlm":
+        # Generic OpenAI-compatible engine: rasterize each page and transcribe
+        # it to markdown. Server-cropped figures (--images/--embed-images) and
+        # figure descriptions (--full) are mistral-engine features.
+        if full or extract_images or embed_images:
+            raise SystemExit(
+                "Error: --full/--images/--embed-images require the 'mistral' OCR "
+                "engine (server-cropped figures). The 'vlm' engine produces page "
+                "markdown only — drop those flags or use --ocr-engine mistral."
+            )
+        from pdfcancel.llm import vlm_ocr_pdf
+        ocr_result = vlm_ocr_pdf(pdf_path, settings, preserve_pages=preserve_pages)
+        markdown_content = ocr_result.markdown
+        raw_images = ocr_result.images
+        ocr_page_count = ocr_result.page_count
+    elif use_sdk:
         # Use mistralai SDK directly to get text, page list, and image data
         from pdfcancel.images import ocr_with_images
         ocr_result = ocr_with_images(

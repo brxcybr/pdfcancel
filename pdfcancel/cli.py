@@ -77,9 +77,28 @@ except ImportError:
               help="CA bundle (PEM) to verify a self-hosted server's TLS "
                    "certificate (overrides MISTRAL_CA_BUNDLE). Verification "
                    "stays enabled.")
+@click.option("--ocr-engine", type=click.Choice(["mistral", "vlm"]), default=None,
+              help="OCR engine: 'mistral' (/v1/ocr, default) or 'vlm' (any "
+                   "OpenAI-compatible vision model via /v1/chat/completions).")
+@click.option("--api-base", default=None,
+              help="OpenAI-compatible server URL for the vlm engine, e.g. a "
+                   "LiteLLM/vLLM endpoint (sets PDFCANCEL_API_BASE; implies "
+                   "--ocr-engine vlm).")
+@click.option("--api-key", default=None,
+              help="Bearer token for the vlm endpoint (default: EMPTY; "
+                   "overrides PDFCANCEL_API_KEY).")
+@click.option("--ca-bundle", type=click.Path(exists=True), default=None,
+              help="CA bundle (PEM) to verify a self-hosted server's TLS cert "
+                   "for either engine (overrides MISTRAL_CA_BUNDLE).")
+@click.option("--ocr-dpi", type=int, default=None,
+              help="vlm engine: page rasterization DPI (default: 200).")
+@click.option("--ocr-concurrency", type=int, default=None,
+              help="vlm engine: concurrent page requests (default: 4).")
 @click.option("--enhance", "enhance_md", type=click.Path(exists=True), default=None,
               help="Enhance an existing markdown file.")
-@click.option("--model", default=None, help="OCR model override (default: mistral-ocr-latest).")
+@click.option("--model", default=None,
+              help="Model override for the active engine (mistral OCR model, "
+                   "or the vlm model).")
 @click.option("--chunks", is_flag=True, help="Also produce chunked JSONL output.")
 @click.option("--chunk-size", type=int, default=1024,
               help="Max tokens per chunk (default: 1024).")
@@ -101,7 +120,8 @@ except ImportError:
               help="Exclude PDFs whose filename contains this text (repeatable).")
 def cancel(
     path, output_dir, images, embed_images, plaintext, full, full_model,
-    mistral_url, mistral_ca_bundle, enhance_md, model, chunks, chunk_size,
+    mistral_url, mistral_ca_bundle, ocr_engine, api_base, api_key, ca_bundle,
+    ocr_dpi, ocr_concurrency, enhance_md, model, chunks, chunk_size,
     chunker, index_name, index_path, no_clean, preserve_pages, force, verbose,
     batch, exclude,
 ):
@@ -117,14 +137,60 @@ def cancel(
     """
     input_path = Path(path)
     settings = Settings()
-    if model:
-        settings.ocr_model = model
-    if full_model:
-        settings.multimodal_model = full_model
-    if mistral_url:
-        settings.mistral_base_url = mistral_url
+
+    # OCR engine + generic OpenAI-compatible (vlm) provider overrides.
+    if ocr_engine:
+        settings.ocr_engine = ocr_engine
+    if api_base:
+        from pdfcancel.config import _normalize_base_url
+        settings.api_base = _normalize_base_url(api_base)
+        if not ocr_engine:
+            settings.ocr_engine = "vlm"  # --api-base implies the vlm engine
+    if api_key:
+        settings.api_key = api_key
+    if ocr_dpi:
+        settings.ocr_dpi = ocr_dpi
+    if ocr_concurrency:
+        settings.ocr_concurrency = ocr_concurrency
+
+    # TLS CA bundle: --ca-bundle is the neutral alias; --mistral-ca-bundle is
+    # kept for back-compat. Either sets the shared bundle used by both engines.
+    if ca_bundle:
+        settings.mistral_ca_bundle = ca_bundle
     if mistral_ca_bundle:
         settings.mistral_ca_bundle = mistral_ca_bundle
+    if mistral_url:
+        settings.mistral_base_url = mistral_url
+
+    # --model targets the active engine's model.
+    if model:
+        if settings.ocr_engine == "vlm":
+            settings.vlm_model = model
+        else:
+            settings.ocr_model = model
+    if full_model:
+        settings.multimodal_model = full_model
+
+    # The vlm engine produces page markdown only; figure extraction/description,
+    # --enhance, and the Mistral Batch API are mistral-engine features.
+    if settings.ocr_engine == "vlm":
+        if full or images or embed_images:
+            raise SystemExit(
+                "Error: --full/--images/--embed-images require --ocr-engine "
+                "mistral (server-cropped figures). The vlm engine produces "
+                "page markdown only."
+            )
+        if enhance_md:
+            raise SystemExit(
+                "Error: --enhance is a mistral-engine workflow and is not "
+                "supported with --ocr-engine vlm."
+            )
+        if batch:
+            console.print(
+                "[dim]--batch applies only to the mistral engine; processing "
+                "per-file with the vlm engine.[/dim]"
+            )
+            batch = False
 
     # --index implies --chunks; set custom index path if provided
     if index_name:

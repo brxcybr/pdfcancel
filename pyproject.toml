@@ -20,6 +20,7 @@ dependencies = [
 [project.optional-dependencies]
 chunking = ["chonkie[semantic]"]
 indexing = ["model2vec", "numpy"]
+vlm = ["pymupdf>=1.24"]
 dev = ["pytest", "ruff"]
 
 [project.scripts]
