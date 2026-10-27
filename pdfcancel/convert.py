@@ -7,10 +7,13 @@ import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from threading import Event
 
 from rich.console import Console
 
 from pdfcancel.config import Settings
+from pdfcancel.errors import ConversionIncomplete
+from pdfcancel.fsio import write_text_atomic
 
 console = Console()
 
@@ -35,9 +38,9 @@ def load_manifest(output_dir: Path) -> dict:
 
 
 def save_manifest(output_dir: Path, manifest: dict) -> None:
-    """Persist the processing manifest."""
+    """Persist the processing manifest (atomically, to survive a forced exit)."""
     manifest_path = output_dir / MANIFEST_NAME
-    manifest_path.write_text(json.dumps(manifest, indent=2))
+    write_text_atomic(manifest_path, json.dumps(manifest, indent=2))
 
 
 def strip_markdown(text: str) -> str:
@@ -105,6 +108,7 @@ def convert_single(
     chunk_size: int = 1024,
     chunker_type: str = "recursive",
     preserve_pages: bool = False,
+    stop: Event | None = None,
 ) -> Path:
     """Convert a single PDF to markdown (or plaintext).
 
@@ -151,7 +155,13 @@ def convert_single(
                 "markdown only — drop those flags or use --ocr-engine mistral."
             )
         from pdfcancel.llm import vlm_ocr_pdf
-        ocr_result = vlm_ocr_pdf(pdf_path, settings, preserve_pages=preserve_pages)
+        ocr_result = vlm_ocr_pdf(
+            pdf_path,
+            settings,
+            preserve_pages=preserve_pages,
+            cache_dir=output_dir,
+            stop=stop,
+        )
         markdown_content = ocr_result.markdown
         raw_images = ocr_result.images
         ocr_page_count = ocr_result.page_count
@@ -248,10 +258,10 @@ def convert_single(
     # Write output
     if plaintext:
         out_path = output_dir / f"{stem}.txt"
-        out_path.write_text(strip_markdown(markdown_content))
+        write_text_atomic(out_path, strip_markdown(markdown_content))
     else:
         out_path = output_dir / f"{stem}.md"
-        out_path.write_text(markdown_content)
+        write_text_atomic(out_path, markdown_content)
 
     # Update manifest
     manifest_entry = {
@@ -284,6 +294,7 @@ def convert_batch(
     chunker_type: str = "recursive",
     verbose: bool = False,
     preserve_pages: bool = False,
+    stop: Event | None = None,
 ) -> list[tuple[Path, Path | None]]:
     """Convert multiple PDFs, with progress display.
 
@@ -295,6 +306,9 @@ def convert_batch(
     failed = 0
 
     for idx, pdf_path in enumerate(pdf_paths, 1):
+        if stop is not None and stop.is_set():
+            console.print("  [yellow]Interrupted — stopping before next file.[/yellow]")
+            break
         try:
             console.print(
                 f"  [dim]({idx}/{total})[/dim] ", end="",
@@ -313,10 +327,19 @@ def convert_batch(
                 chunk_size=chunk_size,
                 chunker_type=chunker_type,
                 preserve_pages=preserve_pages,
+                stop=stop,
             )
             results.append((pdf_path, out))
             if verbose:
                 console.print(f"  [green]✓[/green] {pdf_path.name} → {out.name}")
+        except ConversionIncomplete as e:
+            # Completed pages are checkpointed; a re-run resumes this document.
+            results.append((pdf_path, None))
+            if e.interrupted:
+                console.print(f"  [yellow]⏸ {pdf_path.name}: {e}[/yellow]")
+                break
+            failed += 1
+            console.print(f"  [yellow]◐ {pdf_path.name}: {e}[/yellow]")
         except Exception as e:
             failed += 1
             results.append((pdf_path, None))
@@ -516,10 +539,10 @@ def convert_batch_pipeline(
             # Write output
             if plaintext:
                 out_path = output_dir / f"{stem}.txt"
-                out_path.write_text(strip_markdown(markdown_content))
+                write_text_atomic(out_path, strip_markdown(markdown_content))
             else:
                 out_path = output_dir / f"{stem}.md"
-                out_path.write_text(markdown_content)
+                write_text_atomic(out_path, markdown_content)
 
             # Update manifest
             pdf_hash = file_hash(pdf_path)

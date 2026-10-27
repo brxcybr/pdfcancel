@@ -14,13 +14,18 @@ engine); nothing in this module touches it.
 from __future__ import annotations
 
 import base64
-from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
+from threading import Event
 
 from rich.console import Console
 
 from pdfcancel.config import Settings
+from pdfcancel.errors import ConversionIncomplete
 from pdfcancel.images import OcrResult
+from pdfcancel.pagecache import PageCache
 from pdfcancel.pages import join_pages
 from pdfcancel.retry import with_retry
 
@@ -39,6 +44,19 @@ VLM_OCR_PROMPT = (
     "- Output only the page's Markdown: no surrounding code fence, no preamble, "
     "and no trailing notes."
 )
+
+# A short fingerprint of the prompt. It is recorded in each page cache so that
+# changing the prompt automatically invalidates stale cached pages.
+VLM_PROMPT_SHA = hashlib.sha256(VLM_OCR_PROMPT.encode("utf-8")).hexdigest()[:12]
+
+
+def _file_sha256(path: Path) -> str:
+    """Stream a file's SHA-256 (used to key the page cache to its source PDF)."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(65536), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _auth_headers(settings: Settings) -> dict[str, str]:
@@ -96,7 +114,12 @@ def resolve_vlm_model(settings: Settings, *, http_client=None) -> str:
             resp.raise_for_status()
             return resp.json()
 
-        data = with_retry(_do, description="list models")
+        data = with_retry(
+            _do,
+            description="list models",
+            attempts=settings.ocr_retries,
+            base_delay=settings.ocr_backoff,
+        )
     finally:
         if own_client:
             client.close()
@@ -164,7 +187,12 @@ def chat_vision(
             resp.raise_for_status()
             return resp.json()
 
-        data = with_retry(_do, description=f"vlm chat ({model})")
+        data = with_retry(
+            _do,
+            description=f"vlm chat ({model})",
+            attempts=settings.ocr_retries,
+            base_delay=settings.ocr_backoff,
+        )
     finally:
         if own_client:
             client.close()
@@ -201,51 +229,150 @@ def vlm_ocr_pdf(
     settings: Settings,
     *,
     preserve_pages: bool = False,
+    cache_dir: Path | None = None,
+    stop: Event | None = None,
 ) -> OcrResult:
     """OCR a PDF with the vlm engine: rasterize pages, transcribe, assemble.
 
-    Returns an :class:`~pdfcancel.images.OcrResult` carrying the joined
-    markdown and per-page markdown. ``images`` is always empty: page
-    transcription does not produce cropped figure images (that is a
-    ``mistral``-engine feature).
+    Resumable and fail-safe for long runs:
+
+    - Each page is checkpointed to a per-document cache (under ``cache_dir``)
+      as soon as it transcribes, so a crash/kill/sleep costs at most the pages
+      still in flight; a re-run reloads finished pages and only does the rest.
+    - A page that fails after exhausting retries does not abort the document;
+      the remaining pages still run and the finished ones stay cached.
+    - When ``stop`` is set (SIGINT/SIGTERM), no new pages are scheduled, the
+      in-flight pages finish and checkpoint, and the run ends cleanly.
+
+    If any page is still missing at the end (interrupted or failed), raises
+    :class:`~pdfcancel.errors.ConversionIncomplete` without assembling output,
+    leaving the cache in place to resume. On full success the cache is removed.
+
+    ``images`` is always empty: page transcription does not produce cropped
+    figure images (that is a ``mistral``-engine feature).
     """
     page_images = rasterize_pdf(pdf_path, dpi=settings.ocr_dpi)
-    if not page_images:
+    n = len(page_images)
+    if n == 0:
         return OcrResult(markdown="", images={}, page_markdowns=[])
 
     model = resolve_vlm_model(settings)
     workers = max(1, int(settings.ocr_concurrency or 1))
+
+    # Page cache keyed by the inputs that determine the output; a change to any
+    # of them resets the cache so stale pages are never reused.
+    cache: PageCache | None = None
+    page_markdowns: list[str | None] = [None] * n
+    if cache_dir is not None:
+        meta = {
+            "pdf_sha256": _file_sha256(pdf_path),
+            "dpi": int(settings.ocr_dpi),
+            "model": model,
+            "prompt_sha": VLM_PROMPT_SHA,
+            "page_count": n,
+        }
+        cache = PageCache(cache_dir, stem=pdf_path.stem, meta=meta)
+        cache.validate_or_reset()
+        for i in range(n):
+            cached = cache.load_page(i)
+            if cached is not None:
+                page_markdowns[i] = cached
+
+    completed = sum(1 for md in page_markdowns if md is not None)
     console.print(
-        f"    Transcribing {len(page_images)} page(s) via vlm model "
-        f"'{model}' (dpi={settings.ocr_dpi}, workers={workers})"
+        f"    Transcribing {n} page(s) via vlm model '{model}' "
+        f"(dpi={settings.ocr_dpi}, workers={workers})"
     )
+    if completed:
+        console.print(f"    Resuming \u2014 {completed}/{n} page(s) already cached")
 
-    page_markdowns: list[str] = [""] * len(page_images)
-    client = settings.build_vision_http_client()
-    try:
-        def _transcribe(item: tuple[int, bytes]) -> tuple[int, str]:
-            index, img = item
-            md = chat_vision(
-                settings,
-                image_bytes=img,
-                prompt=VLM_OCR_PROMPT,
-                model=model,
-                mime="image/png",
-                http_client=client,
-            )
-            return index, md
+    last_emit = time.monotonic()
 
-        items = list(enumerate(page_images))
-        if workers == 1:
-            for item in items:
-                index, md = _transcribe(item)
-                page_markdowns[index] = md
+    def _emit(force: bool = False) -> None:
+        nonlocal last_emit
+        now = time.monotonic()
+        if force or now - last_emit >= 10.0:
+            pct = int(completed * 100 / n) if n else 100
+            console.print(f"    \u2026 {completed}/{n} pages ({pct}%)")
+            last_emit = now
+
+    todo = [i for i in range(n) if page_markdowns[i] is None]
+    failed: list[int] = []
+    interrupted = False
+
+    if todo:
+        if stop is not None and stop.is_set():
+            interrupted = True
         else:
-            with ThreadPoolExecutor(max_workers=workers) as executor:
-                for index, md in executor.map(_transcribe, items):
-                    page_markdowns[index] = md
-    finally:
-        client.close()
+            client = settings.build_vision_http_client()
+
+            def _transcribe(index: int) -> tuple[int, str]:
+                md = chat_vision(
+                    settings,
+                    image_bytes=page_images[index],
+                    prompt=VLM_OCR_PROMPT,
+                    model=model,
+                    mime="image/png",
+                    http_client=client,
+                )
+                return index, md
+
+            try:
+                pending = iter(todo)
+                inflight: dict = {}
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    # Prime up to `workers` pages, then refill one-for-one as
+                    # each completes so a stop can halt new work immediately.
+                    for _ in range(workers):
+                        try:
+                            idx = next(pending)
+                        except StopIteration:
+                            break
+                        inflight[executor.submit(_transcribe, idx)] = idx
+
+                    while inflight:
+                        done_set, _ = wait(inflight, return_when=FIRST_COMPLETED)
+                        for fut in done_set:
+                            idx = inflight.pop(fut)
+                            try:
+                                _, md = fut.result()
+                                page_markdowns[idx] = md
+                                if cache is not None:
+                                    cache.save_page(idx, md)
+                                completed += 1
+                            except Exception as exc:
+                                failed.append(idx)
+                                console.print(
+                                    f"    [red]page {idx + 1} failed[/red] "
+                                    f"({type(exc).__name__}: {exc})"
+                                )
+                            _emit()
+
+                        if stop is not None and stop.is_set():
+                            interrupted = True
+                            continue  # drain in-flight; schedule nothing new
+
+                        while len(inflight) < workers:
+                            try:
+                                idx = next(pending)
+                            except StopIteration:
+                                break
+                            inflight[executor.submit(_transcribe, idx)] = idx
+            finally:
+                client.close()
+
+    _emit(force=True)
+
+    missing = [i + 1 for i in range(n) if page_markdowns[i] is None]
+    if missing:
+        raise ConversionIncomplete(
+            total=n,
+            completed=n - len(missing),
+            failed_pages=sorted(missing),
+            interrupted=interrupted,
+        )
 
     markdown = join_pages(page_markdowns, preserve_pages=preserve_pages)
+    if cache is not None:
+        cache.cleanup()
     return OcrResult(markdown=markdown, images={}, page_markdowns=page_markdowns)

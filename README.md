@@ -81,6 +81,9 @@ MISTRAL_API_KEY=your-key-here
 | `PDFCANCEL_VLM_MODEL` | *(unset)* | Model id for the `vlm` engine (required for a multi-model proxy) |
 | `PDFCANCEL_OCR_DPI` | `200` | `vlm` engine: page rasterization DPI |
 | `PDFCANCEL_OCR_CONCURRENCY` | `4` | `vlm` engine: concurrent page requests |
+| `PDFCANCEL_OCR_RETRIES` | `5` | `vlm` engine: network retry attempts per request |
+| `PDFCANCEL_OCR_BACKOFF` | `2.0` | `vlm` engine: base seconds for exponential retry backoff |
+| `PDFCANCEL_OCR_TIMEOUT` | `180` | `vlm` engine: per-request read/write timeout in seconds (connect is fixed at 15s) |
 
 ### Choosing an OCR engine (`--ocr-engine`)
 
@@ -129,6 +132,29 @@ pdfcancel ./refs/ \
    ```bash
    pdfcancel ./docs/ --chunks --preserve-pages
    ```
+
+### Resilient long runs (`backlog` / `status`)
+
+Converting a large library over a remote (`vlm`) endpoint can take hours, so pdfcancel is built to survive interruptions — a dropped connection, a `Ctrl-C`, a `SIGTERM`, or the machine sleeping — without losing work or corrupting output:
+
+- **Per-page checkpointing (`vlm`).** Each page's markdown is cached under `.pdfcancel_cache/<stem>/` the moment it transcribes. A disruption costs at most the pages still in flight; a re-run reloads finished pages and only transcribes the rest. The cache is keyed to the PDF, DPI, model, and prompt, and is removed once the document is assembled.
+- **Atomic writes.** The `.md`, `_chunks.jsonl`, and the JSON manifest / run-state are written to a temp file and `os.replace`-d into place, so a crash mid-write never leaves a truncated file.
+- **One bad page won't sink a document.** A page that fails after retries is recorded, not fatal; the other pages still run. If any page is ultimately missing, the final `.md` is withheld and the cache kept, so a re-run retries only the missing pages.
+- **Graceful stop.** `Ctrl-C` / `SIGTERM` is cooperative: in-flight pages finish and checkpoint, then the run exits with a resumable message (exit code `2`).
+- **Tunable networking.** `--ocr-retries` / `PDFCANCEL_OCR_RETRIES` (default 5), `PDFCANCEL_OCR_BACKOFF` (default 2.0s), and `--ocr-timeout` / `PDFCANCEL_OCR_TIMEOUT` (default 180s read/write; 15s connect) govern transient-failure handling.
+
+Use `backlog` to convert a directory resumably, and `status` to check progress without grepping a log:
+
+```bash
+# Convert everything under ./refs/ (outputs land next to each PDF).
+# Already-converted files are skipped; re-run the same command to resume.
+pdfcancel backlog ./refs/ --chunks --preserve-pages --caffeinate
+
+# In another shell, check progress at any time:
+pdfcancel status ./refs/
+```
+
+`backlog` writes a `.pdfcancel_run.json` to the directory (counts, current file, timestamps) that `status` renders as a table. On macOS, `--caffeinate` keeps the system awake for the run so idle sleep can't interrupt it (it re-execs under `caffeinate -i`). The same resilience applies to a plain `pdfcancel ./dir/` run; `backlog` adds the durable run-state and `status` view.
 
 ### Self-hosted / local Mistral server
 

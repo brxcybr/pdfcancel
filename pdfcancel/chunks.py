@@ -20,6 +20,7 @@ from typing import Any
 from rich.console import Console
 
 from pdfcancel.charts import extract_chart_metadata
+from pdfcancel.fsio import write_text_atomic
 from pdfcancel.pages import (
     build_page_index,
     page_range_for_span,
@@ -303,12 +304,9 @@ def chunk_markdown(
 
 
 def write_chunks_jsonl(chunks: list[dict], output_path: Path) -> Path:
-    """Write chunks to a JSONL file (one JSON object per line)."""
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w") as f:
-        for chunk in chunks:
-            f.write(json.dumps(chunk, ensure_ascii=False) + "\n")
-    return output_path
+    """Write chunks to a JSONL file (one JSON object per line), atomically."""
+    text = "".join(json.dumps(chunk, ensure_ascii=False) + "\n" for chunk in chunks)
+    return write_text_atomic(output_path, text)
 
 
 def _create_chunker(chunker_type: str, chunk_size: int) -> Any:

@@ -39,6 +39,17 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _float_env(name: str, default: float) -> float:
+    """Parse a float from an env var, falling back to default on absence/garbage."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw.strip())
+    except ValueError:
+        return default
+
+
 @dataclass
 class Settings:
     """Runtime settings resolved from env vars, CLI flags, and defaults."""
@@ -75,6 +86,16 @@ class Settings:
     ocr_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_OCR_DPI", 200))
     ocr_concurrency: int = field(
         default_factory=lambda: _int_env("PDFCANCEL_OCR_CONCURRENCY", 4)
+    )
+    # Network resilience for the vlm engine (long/flaky runs). Retries apply
+    # per request (page transcription, model listing); timeout is the per-page
+    # read/write budget.
+    ocr_retries: int = field(default_factory=lambda: _int_env("PDFCANCEL_OCR_RETRIES", 5))
+    ocr_backoff: float = field(
+        default_factory=lambda: _float_env("PDFCANCEL_OCR_BACKOFF", 2.0)
+    )
+    ocr_timeout: float = field(
+        default_factory=lambda: _float_env("PDFCANCEL_OCR_TIMEOUT", 180.0)
     )
     output_dir: Path | None = None  # None means "same directory as input"
 
@@ -160,6 +181,12 @@ class Settings:
                     f"Error: CA bundle path does not exist: {ca_bundle}"
                 )
             verify = ca_bundle
-        return httpx.Client(
-            verify=verify, follow_redirects=True, timeout=httpx.Timeout(180.0)
+        # Split timeouts: fail fast on a dead connection, but allow a long read
+        # for a slow page transcription. ``read``/``write`` use ocr_timeout.
+        timeout = httpx.Timeout(
+            connect=15.0,
+            read=self.ocr_timeout,
+            write=self.ocr_timeout,
+            pool=30.0,
         )
+        return httpx.Client(verify=verify, follow_redirects=True, timeout=timeout)

@@ -9,6 +9,10 @@ Usage:
 
 from __future__ import annotations
 
+import json
+import os
+import sys
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -23,8 +27,72 @@ from pdfcancel.convert import (
     convert_single,
     gather_pdfs,
 )
+from pdfcancel.errors import ConversionIncomplete
+from pdfcancel.runstate import RUN_STATE_NAME, RunState, stop_on_signals
 
 console = Console()
+
+
+def _maybe_reexec_caffeinate(enabled: bool) -> None:
+    """On macOS, re-exec the current command under ``caffeinate -i`` so idle
+    sleep cannot interrupt a long run. Guarded by an env var so it happens at
+    most once; a no-op off macOS or when caffeinate is unavailable.
+    """
+    if not enabled or os.environ.get("PDFCANCEL_CAFFEINATED") == "1":
+        return
+    if sys.platform != "darwin":
+        console.print("[dim]--caffeinate is macOS-only; continuing without it.[/dim]")
+        return
+    import shutil
+
+    caffeinate = shutil.which("caffeinate")
+    if not caffeinate:
+        console.print("[yellow]caffeinate not found; continuing without it.[/yellow]")
+        return
+    env = dict(os.environ, PDFCANCEL_CAFFEINATED="1")
+    console.print("[dim]Keeping the system awake via caffeinate for this run.[/dim]")
+    os.execve(caffeinate, [caffeinate, "-i", sys.executable, *sys.argv], env)
+
+
+def _apply_vlm_overrides(
+    settings: Settings,
+    *,
+    ocr_engine: str | None,
+    api_base: str | None,
+    api_key: str | None,
+    ca_bundle: str | None,
+    model: str | None,
+    ocr_dpi: int | None,
+    ocr_concurrency: int | None,
+    ocr_retries: int | None,
+    ocr_timeout: float | None,
+) -> None:
+    """Apply engine/provider CLI overrides onto ``settings`` (shared by backlog)."""
+    from pdfcancel.config import _normalize_base_url
+
+    if ocr_engine:
+        settings.ocr_engine = ocr_engine
+    if api_base:
+        settings.api_base = _normalize_base_url(api_base)
+        if not ocr_engine:
+            settings.ocr_engine = "vlm"
+    if api_key:
+        settings.api_key = api_key
+    if ca_bundle:
+        settings.mistral_ca_bundle = ca_bundle
+    if model:
+        if settings.ocr_engine == "vlm":
+            settings.vlm_model = model
+        else:
+            settings.ocr_model = model
+    if ocr_dpi:
+        settings.ocr_dpi = ocr_dpi
+    if ocr_concurrency:
+        settings.ocr_concurrency = ocr_concurrency
+    if ocr_retries is not None:
+        settings.ocr_retries = ocr_retries
+    if ocr_timeout is not None:
+        settings.ocr_timeout = ocr_timeout
 
 
 class DefaultGroup(click.Group):
@@ -94,6 +162,14 @@ except ImportError:
               help="vlm engine: page rasterization DPI (default: 200).")
 @click.option("--ocr-concurrency", type=int, default=None,
               help="vlm engine: concurrent page requests (default: 4).")
+@click.option("--ocr-retries", type=int, default=None,
+              help="vlm engine: network retry attempts per request (default: 5).")
+@click.option("--ocr-timeout", type=float, default=None,
+              help="vlm engine: per-request read/write timeout in seconds "
+                   "(default: 180).")
+@click.option("--caffeinate", is_flag=True,
+              help="macOS: keep the system awake for the run (prevents idle "
+                   "sleep from interrupting a long conversion).")
 @click.option("--enhance", "enhance_md", type=click.Path(exists=True), default=None,
               help="Enhance an existing markdown file.")
 @click.option("--model", default=None,
@@ -121,7 +197,8 @@ except ImportError:
 def cancel(
     path, output_dir, images, embed_images, plaintext, full, full_model,
     mistral_url, mistral_ca_bundle, ocr_engine, api_base, api_key, ca_bundle,
-    ocr_dpi, ocr_concurrency, enhance_md, model, chunks, chunk_size,
+    ocr_dpi, ocr_concurrency, ocr_retries, ocr_timeout, caffeinate,
+    enhance_md, model, chunks, chunk_size,
     chunker, index_name, index_path, no_clean, preserve_pages, force, verbose,
     batch, exclude,
 ):
@@ -136,6 +213,7 @@ def cancel(
       pdfcancel paper.pdf --enhance old.md      # upgrade existing markdown
     """
     input_path = Path(path)
+    _maybe_reexec_caffeinate(caffeinate)
     settings = Settings()
 
     # OCR engine + generic OpenAI-compatible (vlm) provider overrides.
@@ -152,6 +230,10 @@ def cancel(
         settings.ocr_dpi = ocr_dpi
     if ocr_concurrency:
         settings.ocr_concurrency = ocr_concurrency
+    if ocr_retries is not None:
+        settings.ocr_retries = ocr_retries
+    if ocr_timeout is not None:
+        settings.ocr_timeout = ocr_timeout
 
     # TLS CA bundle: --ca-bundle is the neutral alias; --mistral-ca-bundle is
     # kept for back-compat. Either sets the shared bundle used by both engines.
@@ -224,44 +306,50 @@ def cancel(
 
     pdf_paths = gather_pdfs(input_path, exclude=list(exclude) if exclude else None)
 
-    if batch and len(pdf_paths) > 1:
-        # Batch pipeline: upload all → batch OCR → batch vision → local post-process
-        pairs = convert_batch_pipeline(
-            pdf_paths, settings,
-            output_dir=out, plaintext=plaintext, extract_images=images,
-            embed_images=embed_images, full=full, force=force,
-            no_clean=no_clean, produce_chunks=chunks,
-            chunk_size=chunk_size, chunker_type=chunker, verbose=verbose,
-            preserve_pages=preserve_pages,
-        )
-        _finish_multi(pairs, index_name, chunk_size, chunker, via=" via batch")
-    elif len(pdf_paths) == 1:
-        from pdfcancel.validate import OcrValidationError
-        try:
-            result = convert_single(
-                pdf_paths[0], settings,
+    # Install cooperative SIGINT/SIGTERM handling so a long run stops cleanly
+    # (in-flight pages checkpoint) rather than dying mid-write.
+    with stop_on_signals() as stop:
+        if batch and len(pdf_paths) > 1:
+            # Batch pipeline: upload all → batch OCR → batch vision → local post-process
+            pairs = convert_batch_pipeline(
+                pdf_paths, settings,
                 output_dir=out, plaintext=plaintext, extract_images=images,
                 embed_images=embed_images, full=full, force=force,
                 no_clean=no_clean, produce_chunks=chunks,
-                chunk_size=chunk_size, chunker_type=chunker,
+                chunk_size=chunk_size, chunker_type=chunker, verbose=verbose,
                 preserve_pages=preserve_pages,
             )
-        except OcrValidationError as e:
-            console.print(f"\n[red]Error:[/red] {e}")
-            raise SystemExit(1)
-        if index_name:
-            _index_file(result, pdf_paths[0].name, index_name, chunk_size, chunker)
-        console.print(f"\n[green]Cancelled.[/green] → {result}")
-    else:
-        pairs = convert_batch(
-            pdf_paths, settings,
-            output_dir=out, plaintext=plaintext, extract_images=images,
-            embed_images=embed_images, full=full, force=force,
-            no_clean=no_clean, produce_chunks=chunks,
-            chunk_size=chunk_size, chunker_type=chunker, verbose=verbose,
-            preserve_pages=preserve_pages,
-        )
-        _finish_multi(pairs, index_name, chunk_size, chunker)
+            _finish_multi(pairs, index_name, chunk_size, chunker, via=" via batch")
+        elif len(pdf_paths) == 1:
+            from pdfcancel.validate import OcrValidationError
+            try:
+                result = convert_single(
+                    pdf_paths[0], settings,
+                    output_dir=out, plaintext=plaintext, extract_images=images,
+                    embed_images=embed_images, full=full, force=force,
+                    no_clean=no_clean, produce_chunks=chunks,
+                    chunk_size=chunk_size, chunker_type=chunker,
+                    preserve_pages=preserve_pages, stop=stop,
+                )
+            except OcrValidationError as e:
+                console.print(f"\n[red]Error:[/red] {e}")
+                raise SystemExit(1)
+            except ConversionIncomplete as e:
+                console.print(f"\n[yellow]Incomplete:[/yellow] {e}")
+                raise SystemExit(2)
+            if index_name:
+                _index_file(result, pdf_paths[0].name, index_name, chunk_size, chunker)
+            console.print(f"\n[green]Cancelled.[/green] → {result}")
+        else:
+            pairs = convert_batch(
+                pdf_paths, settings,
+                output_dir=out, plaintext=plaintext, extract_images=images,
+                embed_images=embed_images, full=full, force=force,
+                no_clean=no_clean, produce_chunks=chunks,
+                chunk_size=chunk_size, chunker_type=chunker, verbose=verbose,
+                preserve_pages=preserve_pages, stop=stop,
+            )
+            _finish_multi(pairs, index_name, chunk_size, chunker)
 
 
 def _finish_multi(
@@ -419,3 +507,158 @@ def indexes():
         table.add_row("[bold]Total[/bold]", f"[bold]{idx['total_chunks']}[/bold]")
         console.print(table)
         console.print(f"  [dim]{idx['path']}[/dim]\n")
+
+
+# ── Backlog command (resumable directory run) ────────────────────────────
+
+@main.command()
+@click.argument("path", type=click.Path(exists=True, file_okay=False))
+@click.option("-o", "--output", "output_dir", type=click.Path(), default=None,
+              help="Output directory (default: alongside each PDF).")
+@click.option("--exclude", multiple=True,
+              help="Exclude PDFs whose filename contains this text (repeatable).")
+@click.option("--ocr-engine", type=click.Choice(["mistral", "vlm"]), default=None,
+              help="OCR engine (default: mistral, or vlm when --api-base is set).")
+@click.option("--api-base", default=None,
+              help="OpenAI-compatible server URL (implies the vlm engine).")
+@click.option("--api-key", default=None, help="Bearer token for the vlm endpoint.")
+@click.option("--ca-bundle", type=click.Path(exists=True), default=None,
+              help="CA bundle (PEM) to verify a self-hosted server's TLS cert.")
+@click.option("--model", default=None, help="Model override for the active engine.")
+@click.option("--ocr-dpi", type=int, default=None, help="vlm: page rasterization DPI.")
+@click.option("--ocr-concurrency", type=int, default=None,
+              help="vlm: concurrent page requests.")
+@click.option("--ocr-retries", type=int, default=None,
+              help="vlm: network retry attempts per request.")
+@click.option("--ocr-timeout", type=float, default=None,
+              help="vlm: per-request read/write timeout in seconds.")
+@click.option("--chunks", is_flag=True, help="Also produce chunked JSONL output.")
+@click.option("--chunk-size", type=int, default=1024, help="Max tokens per chunk.")
+@click.option("--chunker",
+              type=click.Choice(["recursive", "semantic", "sentence", "hierarchical"]),
+              default="recursive", help="Chunking strategy (default: recursive).")
+@click.option("--preserve-pages", is_flag=True,
+              help="Inject page markers for page-level citations.")
+@click.option("--no-clean", is_flag=True, help="Skip post-OCR cleanup.")
+@click.option("--plaintext", is_flag=True, help="Output plaintext instead of markdown.")
+@click.option("--force", is_flag=True, help="Re-process even if already converted.")
+@click.option("--caffeinate", is_flag=True,
+              help="macOS: keep the system awake for the run.")
+def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
+            model, ocr_dpi, ocr_concurrency, ocr_retries, ocr_timeout, chunks,
+            chunk_size, chunker, preserve_pages, no_clean, plaintext, force,
+            caffeinate):
+    """Resumably convert every PDF under a directory.
+
+    Checkpointed and signal-safe: already-converted files are skipped, each
+    page is cached as it transcribes, and Ctrl-C (or SIGTERM) stops cleanly so
+    a re-run resumes where it left off. Progress is written to a run-state file
+    that ``pdfcancel status <dir>`` can read.
+    """
+    _maybe_reexec_caffeinate(caffeinate)
+    root = Path(path)
+    settings = Settings()
+    _apply_vlm_overrides(
+        settings, ocr_engine=ocr_engine, api_base=api_base, api_key=api_key,
+        ca_bundle=ca_bundle, model=model, ocr_dpi=ocr_dpi,
+        ocr_concurrency=ocr_concurrency, ocr_retries=ocr_retries,
+        ocr_timeout=ocr_timeout,
+    )
+
+    pdf_paths = gather_pdfs(root, exclude=list(exclude) if exclude else None)
+    out_ext = ".txt" if plaintext else ".md"
+    state = RunState(root / RUN_STATE_NAME, total=len(pdf_paths))
+    console.print(f"[bold]Backlog:[/bold] {len(pdf_paths)} PDF(s) under {root}")
+
+    interrupted = False
+    with stop_on_signals() as stop:
+        for idx, pdf in enumerate(pdf_paths, 1):
+            if stop.is_set():
+                interrupted = True
+                break
+            out_dir = Path(output_dir) if output_dir else pdf.parent
+            existing = out_dir / f"{pdf.stem}{out_ext}"
+            if not force and existing.exists():
+                state.record(pdf.name, "skipped")
+                continue
+            state.set_current(pdf.name)
+            console.print(f"  [dim]({idx}/{len(pdf_paths)})[/dim] {pdf.name}")
+            try:
+                convert_single(
+                    pdf, settings, output_dir=out_dir, plaintext=plaintext,
+                    no_clean=no_clean, produce_chunks=chunks,
+                    chunk_size=chunk_size, chunker_type=chunker,
+                    preserve_pages=preserve_pages, force=force, stop=stop,
+                )
+                state.record(pdf.name, "done")
+            except ConversionIncomplete as e:
+                state.record(pdf.name, "incomplete")
+                console.print(f"    [yellow]◐ {e}[/yellow]")
+                if e.interrupted:
+                    interrupted = True
+                    break
+            except Exception as e:  # noqa: BLE001 - keep going on a bad file
+                state.record(pdf.name, "failed")
+                console.print(f"    [red]✗ {e}[/red]")
+    state.finish()
+
+    d = state.data
+    console.print(
+        f"\n[bold]Done:[/bold] {d['done']} converted, {d['skipped']} skipped, "
+        f"{d['incomplete']} incomplete, {d['failed']} failed (of {d['total']})"
+    )
+    if d["failures"]:
+        console.print("  [red]Failed:[/red] " + ", ".join(d["failures"]))
+    if interrupted:
+        console.print(
+            "  [yellow]Interrupted — re-run the same command to resume.[/yellow]"
+        )
+    if interrupted or d["incomplete"] or d["failed"]:
+        raise SystemExit(2)
+
+
+# ── Status command ────────────────────────────────────────────
+
+@main.command()
+@click.argument("path", type=click.Path(exists=True, file_okay=False))
+def status(path):
+    """Show the progress of a backlog run under <dir>."""
+    state_path = Path(path) / RUN_STATE_NAME
+    if not state_path.exists():
+        console.print(f"[yellow]No run state found at {state_path}[/yellow]")
+        console.print("  Start one with:  pdfcancel backlog <dir> ...")
+        return
+    data = json.loads(state_path.read_text())
+
+    elapsed = "?"
+    try:
+        start = datetime.fromisoformat(data["started_at"])
+        updated = datetime.fromisoformat(data["updated_at"])
+        secs = int((updated - start).total_seconds())
+        elapsed = f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+    except (KeyError, ValueError):
+        pass
+
+    total = data.get("total", 0)
+    accounted = (
+        data.get("done", 0) + data.get("skipped", 0)
+        + data.get("incomplete", 0) + data.get("failed", 0)
+    )
+    remaining = max(0, total - accounted)
+
+    table = Table(title=f"Backlog status — {Path(path).name}", show_header=False)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("State", "finished" if data.get("finished") else "in progress")
+    table.add_row("Done", str(data.get("done", 0)))
+    table.add_row("Skipped", str(data.get("skipped", 0)))
+    table.add_row("Incomplete", str(data.get("incomplete", 0)))
+    table.add_row("Failed", str(data.get("failed", 0)))
+    table.add_row("Remaining", str(remaining))
+    table.add_row("Total", str(total))
+    table.add_row("Current", str(data.get("current") or "—"))
+    table.add_row("Elapsed", elapsed)
+    table.add_row("Updated", data.get("updated_at", "?"))
+    console.print(table)
+    if data.get("failures"):
+        console.print("  [red]Failed:[/red] " + ", ".join(data["failures"]))
