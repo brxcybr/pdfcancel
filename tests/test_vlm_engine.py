@@ -210,7 +210,7 @@ def _stub_ocr(monkeypatch, pages: list[bytes]):
     monkeypatch.setattr(
         llm,
         "chat_vision",
-        lambda s, *, image_bytes, prompt, model, mime="image/png", http_client=None: (
+        lambda s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None: (
             f"PAGE[{image_bytes.decode()}]"
         ),
     )
