@@ -9,11 +9,12 @@
 #                   profile.env, else keep the current profile, else start from
 #                   profile.env.example.
 #   --ca CERT       CA certificate(s) concatenated into
-#                   ~/.config/pdfcancel/skill-ca.pem (repeatable). A bundle's
+#                   ~/.config/pdfcancel/skill-ca.pem (repeatable), which the
+#                   profile's PDFCANCEL_CA_BUNDLE is then set to. A bundle's
 #                   ca/ directory is used automatically.
-#   --venv DIR      where to create the pdfcancel virtualenv
-#                   (default: the profile's PDFCANCEL_VENV, else
-#                   ~/.local/share/pdfcancel/venv).
+#   --venv DIR      where to create the pdfcancel virtualenv, recorded as the
+#                   profile's PDFCANCEL_VENV (default: the profile's value,
+#                   else ~/.local/share/pdfcancel/venv).
 #   --no-venv       don't create or update a virtualenv (use an existing one).
 #   --link          symlink the skill instead of copying it (for development
 #                   from a checkout, so edits apply immediately).
@@ -49,6 +50,15 @@ done
 
 mkdir -p "$CONF" "$SKILLS"
 
+# Replace NAME's assignment in the installed profile with NAME=VALUE (VALUE is
+# written as given, already quoted for the shell).
+set_profile() {
+  grep -v "^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}$1=" "$CONF/skill.env" > "$CONF/skill.env.tmp" || true
+  printf '%s=%s\n' "$1" "$2" >> "$CONF/skill.env.tmp"
+  mv "$CONF/skill.env.tmp" "$CONF/skill.env"
+  chmod 600 "$CONF/skill.env"
+}
+
 # 1. Profile.
 if [ -n "$PROFILE_SRC" ]; then
   [ -f "$CONF/skill.env" ] && cp "$CONF/skill.env" "$CONF/skill.env.bak.$(date +%Y%m%d%H%M%S)"
@@ -63,16 +73,10 @@ chmod 600 "$CONF/skill.env"
 if [ ${#CAS[@]} -gt 0 ]; then
   cat ${CAS[@]+"${CAS[@]}"} > "$CONF/skill-ca.pem"
   echo "Wrote $CONF/skill-ca.pem from ${#CAS[@]} certificate file(s)."
-  # Point the profile at it unless it already names a CA file that exists here
-  # (a builder's absolute path from another machine does not count).
-  CURRENT="$( set -a; . "$CONF/skill.env"; echo "${PDFCANCEL_CA_BUNDLE:-}" )"
-  if [ -z "$CURRENT" ] || [ ! -f "$CURRENT" ]; then
-    grep -v '^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}PDFCANCEL_CA_BUNDLE=' "$CONF/skill.env" > "$CONF/skill.env.tmp" || true
-    printf 'PDFCANCEL_CA_BUNDLE="$HOME/.config/pdfcancel/skill-ca.pem"\n' >> "$CONF/skill.env.tmp"
-    mv "$CONF/skill.env.tmp" "$CONF/skill.env"
-    chmod 600 "$CONF/skill.env"
-    echo "Set PDFCANCEL_CA_BUNDLE in $CONF/skill.env to that file."
-  fi
+  # Point the profile at it: certificates given to the installer are the ones
+  # to trust (a profile's own path is often the builder's, from another machine).
+  set_profile PDFCANCEL_CA_BUNDLE '"$HOME/.config/pdfcancel/skill-ca.pem"'
+  echo "Set PDFCANCEL_CA_BUNDLE in $CONF/skill.env to that file."
 fi
 
 # Source repository: environment, then profile, then the public default.
@@ -82,9 +86,13 @@ PDFCANCEL_REPO="${ENV_REPO:-${PROFILE_REPO:-https://github.com/brxcybr/pdfcancel
 PDFCANCEL_REF="${ENV_REF:-${PROFILE_REF:-main}}"
 
 # 3. Virtualenv with pdfcancel[vlm,chunking].
-if [ -z "$VENV" ]; then
-  VENV="$( set -a; . "$CONF/skill.env"; echo "${PDFCANCEL_VENV:-}" )"
-  VENV="${VENV:-$HOME/.local/share/pdfcancel/venv}"
+PROFILE_VENV="$( set -a; . "$CONF/skill.env"; echo "${PDFCANCEL_VENV:-}" )"
+VENV="${VENV:-${PROFILE_VENV:-$HOME/.local/share/pdfcancel/venv}}"
+case "$VENV" in /*) ;; *) VENV="$PWD/$VENV" ;; esac
+if [ "$VENV" != "$PROFILE_VENV" ]; then
+  # The wrapper reads the venv from the profile: record the one used here.
+  set_profile PDFCANCEL_VENV "$(printf '%q' "$VENV")"
+  echo "Set PDFCANCEL_VENV in $CONF/skill.env to $VENV."
 fi
 if [ "$MAKE_VENV" = 1 ]; then
   PYBIN=""
