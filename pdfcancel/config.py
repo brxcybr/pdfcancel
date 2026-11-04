@@ -89,6 +89,12 @@ class Settings:
         default_factory=lambda: os.getenv("PDFCANCEL_VLM_FULL_MODEL", "").strip()
     )
     figure_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_FIGURE_DPI", 200))
+    # vlm engine: give the model each born-digital page's embedded text as the
+    # authoritative spelling (identifiers, names, numbers).
+    vlm_text_layer: bool = field(
+        default_factory=lambda: os.getenv("PDFCANCEL_VLM_TEXT_LAYER", "1").strip().lower()
+        not in ("0", "false", "no", "off")
+    )
     ocr_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_OCR_DPI", 200))
     ocr_concurrency: int = field(
         default_factory=lambda: _int_env("PDFCANCEL_OCR_CONCURRENCY", 4)

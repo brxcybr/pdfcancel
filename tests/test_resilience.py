@@ -168,6 +168,7 @@ def _expected_meta(pdf: Path, settings: Settings, page_count: int) -> dict:
         "dpi": int(settings.ocr_dpi),
         "model": settings.vlm_model,
         "prompt_sha": llm.VLM_PROMPT_SHA,
+        "text_layer": bool(settings.vlm_text_layer),
         "page_count": page_count,
     }
 
