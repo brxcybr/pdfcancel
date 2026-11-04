@@ -419,6 +419,31 @@ Search options:
   --context              Include neighboring chunks
 ```
 
+## Agent skill (`skills/pdfcancel`)
+
+`skills/pdfcancel/` is an agent skill (a `SKILL.md` plus scripts) that teaches
+any shell-capable coding agent to run pdfcancel against your self-hosted
+endpoint. That covers converting with local `--full`, querying a single page,
+and reading the page-cited output. Site settings (endpoint, models, token, CA)
+live in a profile at `~/.config/pdfcancel/skill.env`, outside the repo.
+
+```bash
+cp skills/pdfcancel/profile.env.example my-site.env   # fill in endpoint + models
+skills/pdfcancel/install.sh --profile my-site.env [--ca internal-root.crt --ca issuing.crt]
+~/.agents/skills/pdfcancel/scripts/pdfcancel-skill.sh check
+```
+
+The installer creates a virtualenv with `pdfcancel[vlm,chunking]` and installs
+the skill to `~/.agents/skills/pdfcancel` (linked into `~/.claude/skills`). It
+ends with an endpoint check. Use `--link` to develop from a checkout.
+
+**Sharing with a team on the same endpoint:**
+`skills/pdfcancel/make-bundle.sh --profile team.env --ca root.crt --ca issuing.crt`
+writes `dist/pdfcancel-skill-<sha>.tar.gz`, which contains the skill, the
+profile, the CA certificates, and a pinned pdfcancel source archive. Recipients
+run `tar xzf …` and then `./pdfcancel-skill/install.sh --profile profile.env`.
+The builder refuses a profile that contains a real API token.
+
 ## Development
 
 ```bash
