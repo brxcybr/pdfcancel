@@ -9,7 +9,8 @@ recovers the figures locally with PyMuPDF so ``--images`` / ``--embed-images``
    clusters (most charts), merged into whole figures and grown to take in
    nearby axis/tick/legend labels.
 2. Drop non-figures: running headers/footers, logos repeated across pages,
-   ruled tables, and shaded code/text boxes (the OCR already transcribed them).
+   ruled tables, shaded text boxes, and monospace code/API callouts (the OCR
+   already transcribed them).
 3. Crop each figure at ``dpi`` and link it into the page's markdown in place of
    the OCR placeholders, as ``![pNNN-fKK.png](pNNN-fKK.png)``. That matches
    the Mistral engine's ``{image_id: bytes}`` + ``![id](id)`` contract, so
@@ -41,6 +42,8 @@ LABEL_MAX_CHARS = 60
 PROSE_LINE_CHARS = 25    # mean chars/line of a paragraph block
 TEXTBOX_MIN_CHARS = 100    # text-box test: this much prose ...
 TEXTBOX_MAX_PATHS = 6      # ... inside at most this many drawn marks
+CODE_BOX_MONO = 0.5        # vector region whose text is mostly monospace = code box
+MONO_FONT_RE = re.compile(r"mono|courier|consol|menlo|code|typewriter", re.IGNORECASE)
 REPEAT_PAGES = 3           # identical crops on this many pages are logos
 
 
@@ -144,7 +147,25 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
                  and min(p.width, p.height) > 1]
         return len(marks) <= TEXTBOX_MAX_PATHS
 
-    rects = [r for r in rects if not is_text_box(r)]
+    # Spec/API documents draw request, header, and JSON callouts as vector
+    # boxes with decorative marks (method badges, rules) that defeat the mark
+    # count above. Their tell is monospace text; across 1,235 reference pages,
+    # real vector figures carried none.
+    spans = [
+        (pymupdf.Rect(sp["bbox"]), sp) for b in blocks for ln in b["lines"]
+        for sp in ln["spans"] if sp["text"].strip()
+    ]
+
+    def is_code_box(r) -> bool:
+        if any((r & i).get_area() >= 0.2 * r.get_area() for i in images):
+            return False
+        inside = [sp for sr, sp in spans if sr in r]
+        chars = sum(len(sp["text"]) for sp in inside)
+        mono = sum(len(sp["text"]) for sp in inside
+                   if sp["flags"] & 8 or MONO_FONT_RE.search(sp["font"]))
+        return chars >= 20 and mono >= CODE_BOX_MONO * chars
+
+    rects = [r for r in rects if not is_text_box(r) and not is_code_box(r)]
 
     # Vector charts keep axis labels, ticks, and legends as text outside the
     # drawing cluster: pull in short nearby lines. Paragraph lines (short in
