@@ -9,6 +9,7 @@
 #   pdfcancel-skill.sh convert <pdf|dir> [opts]   # OCR + figures + --full + chunks
 #   pdfcancel-skill.sh ocr     <pdf|dir> [opts]   # text-only pass (no figures)
 #   pdfcancel-skill.sh ask <pdf> <page> "prompt"  # one page -> model, answer to stdout
+#   pdfcancel-skill.sh update                     # latest pdfcancel + skill from the repo
 #   pdfcancel-skill.sh <pdfcancel args...>        # passthrough (search, status, ...)
 set -euo pipefail
 
@@ -29,6 +30,37 @@ set +a
 BIN="$PDFCANCEL_VENV/bin/pdfcancel"
 PY="$PDFCANCEL_VENV/bin/python"
 HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pdfcancel_skill.py"
+
+# update: fetch the latest repository and re-run its installer, which upgrades
+# pdfcancel in the venv and refreshes these skill files. The profile and CA
+# bundle are kept (no --profile/--ca is passed).
+if [ "${1:-}" = "update" ]; then
+  SKILL_DIR="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  if [ -f "$SKILL_DIR/../../pyproject.toml" ]; then
+    echo "This skill is linked to a checkout ($(cd "$SKILL_DIR/../.." && pwd))." >&2
+    echo "Update it there: git pull && make install" >&2
+    exit 0
+  fi
+  REPO="${PDFCANCEL_REPO:-https://github.com/brxcybr/pdfcancel}"
+  REF="${PDFCANCEL_REF:-main}"
+  TMP="$(mktemp -d)"
+  trap 'rm -rf "$TMP"' EXIT
+  echo "Fetching $REPO ($REF) ..."
+  if command -v git >/dev/null; then
+    git clone --quiet --depth 1 --branch "$REF" "$REPO" "$TMP/src"
+  else
+    case "$REPO" in
+      https://github.com/*)
+        mkdir -p "$TMP/src"
+        curl -fsSL "https://codeload.github.com/${REPO#https://github.com/}/tar.gz/$REF" |
+          tar -xz -C "$TMP/src" --strip-components 1 ;;
+      *) echo "update needs git to fetch $REPO" >&2; exit 69 ;;
+    esac
+  fi
+  PDFCANCEL_REPO="$REPO" PDFCANCEL_REF="$REF" \
+    bash "$TMP/src/skills/pdfcancel/install.sh" --venv "$PDFCANCEL_VENV"
+  exit $?
+fi
 [ -x "$BIN" ] || {
   echo "pdfcancel not installed in $PDFCANCEL_VENV. Run the skill's install.sh, or:" >&2
   echo "  git clone https://github.com/brxcybr/pdfcancel && pdfcancel/skills/pdfcancel/install.sh" >&2
@@ -87,7 +119,7 @@ case "$cmd" in
     exec "$PY" -I "$HELPER" ask "$@"
     ;;
   "")
-    echo "usage: $0 check | convert <pdf|dir> | ocr <pdf|dir> | ask <pdf> <page> \"prompt\" | <pdfcancel args>" >&2
+    echo "usage: $0 check | convert <pdf|dir> | ocr <pdf|dir> | ask <pdf> <page> \"prompt\" | update | <pdfcancel args>" >&2
     exit 64
     ;;
   *)

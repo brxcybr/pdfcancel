@@ -18,13 +18,14 @@
 #   --link          symlink the skill instead of copying it (for development
 #                   from a checkout, so edits apply immediately).
 #
-# pdfcancel itself comes from, in order: a bundle's pinned pdfcancel-src.tar.gz,
-# the surrounding checkout, or $PDFCANCEL_REPO at $PDFCANCEL_REF
-# (default https://github.com/brxcybr/pdfcancel at main).
+# pdfcancel itself comes from, in order: a pinned pdfcancel-src.tar.gz (only
+# in bundles built with --pin), the surrounding checkout, or the latest
+# $PDFCANCEL_REPO at $PDFCANCEL_REF (default https://github.com/brxcybr/pdfcancel
+# at main; the environment overrides the profile). Re-running, or
+# `pdfcancel-skill.sh update`, upgrades in place.
 set -euo pipefail
 
-PDFCANCEL_REPO="${PDFCANCEL_REPO:-https://github.com/brxcybr/pdfcancel}"
-PDFCANCEL_REF="${PDFCANCEL_REF:-main}"
+ENV_REPO="${PDFCANCEL_REPO:-}" ENV_REF="${PDFCANCEL_REF:-}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF="$HOME/.config/pdfcancel"
@@ -74,6 +75,12 @@ if [ ${#CAS[@]} -gt 0 ]; then
   fi
 fi
 
+# Source repository: environment, then profile, then the public default.
+PROFILE_REPO="$( set -a; . "$CONF/skill.env"; echo "${PDFCANCEL_REPO:-}" )"
+PROFILE_REF="$( set -a; . "$CONF/skill.env"; echo "${PDFCANCEL_REF:-}" )"
+PDFCANCEL_REPO="${ENV_REPO:-${PROFILE_REPO:-https://github.com/brxcybr/pdfcancel}}"
+PDFCANCEL_REF="${ENV_REF:-${PROFILE_REF:-main}}"
+
 # 3. Virtualenv with pdfcancel[vlm,chunking].
 if [ -z "$VENV" ]; then
   VENV="$( set -a; . "$CONF/skill.env"; echo "${PDFCANCEL_VENV:-}" )"
@@ -99,6 +106,10 @@ if [ "$MAKE_VENV" = 1 ]; then
   "$VENV/bin/python" -m pip install --quiet --upgrade pip
   case "$SRC" in git+*) URL="$SRC" ;; *) URL="file://$SRC" ;; esac
   "$VENV/bin/python" -m pip install --quiet "pdfcancel[vlm,chunking] @ $URL"
+  # pip treats an unchanged version from the same URL as satisfied; force the
+  # pdfcancel package itself (not its dependencies) so re-runs get new code.
+  "$VENV/bin/python" -m pip install --quiet --force-reinstall --no-deps "pdfcancel @ $URL"
+  echo "pdfcancel $("$VENV/bin/python" -c 'import importlib.metadata as m; print(m.version("pdfcancel"))') installed from $SRC"
 fi
 
 # 4. Skill files, shared by every agent; Claude Code reads ~/.claude/skills.

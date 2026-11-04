@@ -31,10 +31,11 @@ If `$W check` exits `127` (pdfcancel missing) or `78` (no profile), the
 workstation isn't set up yet. **Ask the user before installing anything**,
 then do one of the following:
 
-- **Team bundle** (`pdfcancel-skill-*.tar.gz`, shared by a teammate): it ships
-  the profile and CA certificates, so nothing has to be filled in.
+- **Team bundle** (`pdfcancel-skill*.tar.gz`, shared by a teammate): it ships
+  the profile and CA certificates, so nothing has to be filled in. pdfcancel
+  itself is pulled from the repository.
   ```bash
-  tar xzf pdfcancel-skill-*.tar.gz && ./pdfcancel-skill/install.sh
+  tar xzf pdfcancel-skill*.tar.gz && ./pdfcancel-skill/install.sh
   ```
 - **From the repository:**
   ```bash
@@ -46,11 +47,22 @@ then do one of the following:
   these values from the user or their team; don't guess endpoints. Re-run
   `install.sh --ca root.crt --ca issuing.crt` to install CA certificates.
 
-`install.sh` creates a virtualenv with `pdfcancel[vlm,chunking]`. It installs
-the skill to `~/.agents/skills/pdfcancel`, linked into `~/.claude/skills`, and
-finishes with an endpoint check. A copy of the installer stays in the skill
-directory, so later re-runs work without the repository. The source comes
-from `$PDFCANCEL_REPO` at `$PDFCANCEL_REF` (default: the URL above, `main`).
+`install.sh` creates a virtualenv with the latest `pdfcancel[vlm,chunking]`. It
+installs the skill to `~/.agents/skills/pdfcancel`, linked into
+`~/.claude/skills`, and finishes with an endpoint check. The source is
+`$PDFCANCEL_REPO` at `$PDFCANCEL_REF` (default: the URL above, `main`; either
+can be set in the profile).
+
+### Updating
+
+```bash
+$W update     # latest pdfcancel + skill files from the repository; keeps profile and CA
+```
+
+Suggest an update to the user, rather than working around the problem, when
+something this skill documents is missing: pdfcancel rejects an option such as
+`--full` on the vlm engine, or a mode listed here doesn't exist. A skill linked
+to a developer checkout is updated there instead (`git pull && make install`).
 
 ## Data-handling boundary
 
@@ -79,6 +91,7 @@ If this fails, stop and report the error. Don't fall back to another route.
 | Text, tables, and in-figure labels only (faster; no crops or descriptions) | `$W ocr <pdf-or-dir> [-o DIR]` |
 | A targeted question about one page ("give Table 3 as CSV") | `$W ask <pdf> <page> "prompt"` |
 | Search an index, check status, other pdfcancel commands | `$W <pdfcancel args>` |
+| Get the latest pdfcancel and skill | `$W update` |
 
 Default to `convert` when figures, charts, or diagrams carry meaning.
 

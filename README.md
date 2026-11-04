@@ -439,10 +439,14 @@ ends with an endpoint check. Use `--link` to develop from a checkout.
 
 **Sharing with a team on the same endpoint:**
 `skills/pdfcancel/make-bundle.sh --profile team.env --ca root.crt --ca issuing.crt`
-writes `dist/pdfcancel-skill-<sha>.tar.gz`, which contains the skill, the
-profile, the CA certificates, and a pinned pdfcancel source archive. Recipients
-run `tar xzf …` and then `./pdfcancel-skill/install.sh`, which picks up the
-bundled profile and CA certificates on its own.
+writes `dist/pdfcancel-skill.tar.gz`, which contains the skill, the profile, and
+the CA certificates. Recipients run `tar xzf …` and then
+`./pdfcancel-skill/install.sh`, which picks up the bundled profile and CA
+certificates on its own and installs the latest pdfcancel from this repository.
+Later, `pdfcancel-skill.sh update` pulls the newest pdfcancel and skill files
+and keeps the profile and CA, so a bundle only needs resharing when site
+settings change. Pass `--pin` to ship a fixed pdfcancel source archive for
+machines that can't reach GitHub.
 The builder refuses a profile that contains secrets: any non-placeholder
 `*KEY*`, `*TOKEN*`, `*SECRET*`, or `*PASS*` value, or a URL with embedded
 credentials.
