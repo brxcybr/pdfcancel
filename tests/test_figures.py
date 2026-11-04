@@ -340,3 +340,50 @@ def test_vlm_descriptions_run_concurrently(monkeypatch):
     out = multimodal.describe_images(images, _vlm_settings(ocr_concurrency=4))
     assert set(out.values()) == {"d"} and len(out) == 8
     assert 1 < peak <= 4
+
+
+def test_backlog_passes_full_through(monkeypatch, tmp_path, pdf):
+    from click.testing import CliRunner
+
+    from pdfcancel import cli
+
+    calls = []
+
+    def fake_convert_single(path, settings, **kw):
+        calls.append((kw["full"], kw["extract_images"], settings.vlm_full_model))
+        out = kw["output_dir"] / f"{path.stem}.md"
+        out.write_text("ok")
+        return out
+    monkeypatch.setattr(cli, "convert_single", fake_convert_single)
+
+    result = CliRunner().invoke(cli.main, [
+        "backlog", str(pdf.parent), "--api-base", "https://h/v1",
+        "--full", "--full-model", "vision-m",
+    ])
+    assert result.exit_code == 0, result.output
+    assert calls == [(True, True, "vision-m")]
+
+
+def test_skips_api_callout_with_monospace_text(tmp_path):
+    """An HTTP/JSON callout: method badge + decorations + short monospace lines."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    box = pymupdf.Rect(72, 200, 540, 460)
+    p.draw_rect(box, color=(0.4, 0.5, 0.8), fill=(0.93, 0.95, 1.0))
+    p.draw_rect(pymupdf.Rect(80, 208, 120, 224), fill=(0.2, 0.4, 0.8), color=None)
+    p.insert_text((86, 220), "GET", fontsize=9, color=(1, 1, 1))
+    for i in range(30):  # small decorative marks, away from the text
+        x = 300 + (i % 10) * 20
+        y = 430 + (i // 10) * 8
+        p.draw_rect(pymupdf.Rect(x, y, x + 6, y + 3), fill=(0.6, 0.6, 0.8), color=None)
+    for i, line in enumerate(["/{api-root}/collections/", "Accept: application/taxii+json",
+                              "200 - OK", '"id": "91a7b528"', '"title": "Indicators"']):
+        p.insert_text((90, 250 + i * 24), line, fontsize=9, fontname="cour")
+    path = tmp_path / "spec.pdf"
+    doc.save(str(path))
+    assert figures.detect_figures(pymupdf.open(str(path))[0])[0] == []
+
+
+def test_keeps_vector_chart_with_proportional_labels(pdf):
+    # The page-1 chart's labels use a proportional font; it must survive.
+    assert len(figures.detect_figures(pymupdf.open(str(pdf))[0])[0]) == 1
