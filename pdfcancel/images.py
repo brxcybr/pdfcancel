@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from rich.console import Console
 
@@ -234,8 +235,11 @@ def _extract_images(
         img_path = img_dir / img_filename
         img_path.write_bytes(img_bytes)
 
-        # Rewrite references in markdown: ![...](img_id) → ![...](relative_path)
-        relative = f"{stem}_images/{img_filename}"
+        # Rewrite references in markdown: ![...](img_id) → ![...](relative_path).
+        # Percent-encode the target: PDF names often contain spaces or
+        # parentheses, which end a markdown link target early (and stop
+        # description injection, which matches up to the closing ")").
+        relative = f"{quote(f'{stem}_images')}/{quote(img_filename)}"
         markdown_content = markdown_content.replace(f"]({img_id})", f"]({relative})")
 
     return markdown_content
