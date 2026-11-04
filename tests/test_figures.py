@@ -143,17 +143,24 @@ def test_split_pages_round_trips():
     assert [n for n, _ in figures._split_pages(md)] == [None, 1, 2, 3]
 
 
-def test_strip_page_markers():
-    out = figures.strip_page_markers(join_pages(["a", "b"], preserve_pages=True))
-    assert "pdfcancel-page" not in out and out.split() == ["a", "b"]
+def test_born_digital_placeholder_without_figure_stays_placeholder(tmp_path):
+    doc = pymupdf.open()
+    doc.new_page(width=612, height=792).insert_text((72, 100), "Only text here.")
+    path = tmp_path / "text.pdf"
+    doc.save(str(path))
+    md, images = figures.extract_figures(path, join_pages(["![figure](figure)"], preserve_pages=True))
+    assert images == {} and "![figure](figure)" in md
 
 
 # ── vlm-engine --full through convert_single ─────────────────────────────────
 
-def _fake_vlm_ocr(markdown: str):
-    def fake(pdf_path, settings, *, preserve_pages=False, cache_dir=None, stop=None):
+def _fake_vlm_ocr(markdown: str, events: list | None = None):
+    def fake(pdf_path, settings, *, preserve_pages=False, cache_dir=None, stop=None,
+             keep_cache=False):
         assert preserve_pages, "figure extraction needs page markers"
-        return OcrResult(markdown=markdown, page_markdowns=["", "", ""])
+        assert keep_cache, "the page cache must outlive figure work"
+        return OcrResult(markdown=markdown, page_markdowns=["", "", ""],
+                         cleanup=lambda: events.append("cleanup") if events is not None else None)
     return fake
 
 
@@ -202,3 +209,134 @@ def test_cli_allows_full_with_vlm(monkeypatch, tmp_path, pdf):
     ])
     assert result.exit_code == 0, result.output
     assert seen == {"engine": "vlm", "full": True, "model": "vision-m"}
+
+
+def _vlm_settings(**kw) -> Settings:
+    return Settings(api_base="https://h/v1", ocr_engine="vlm", vlm_model="ocr-m",
+                    vlm_full_model="vision-m", **kw)
+
+
+def test_page_cache_removed_only_after_output_written(pdf, tmp_path, monkeypatch):
+    from pdfcancel import convert, llm
+
+    events: list[str] = []
+    monkeypatch.setattr(llm, "vlm_ocr_pdf", _fake_vlm_ocr(_ocr_markdown(), events))
+    monkeypatch.setattr(llm, "chat_vision", lambda settings, **kw: "desc")
+    real_write = convert.write_text_atomic
+    monkeypatch.setattr(convert, "write_text_atomic",
+                        lambda path, text: (events.append("write"), real_write(path, text)))
+    convert.convert_single(pdf, _vlm_settings(), output_dir=tmp_path / "o", full=True,
+                           extract_images=True)
+    assert events[-1] == "cleanup" and events.count("cleanup") == 1 and "write" in events  # .md and manifest first
+
+
+def test_page_cache_kept_when_describe_phase_dies(pdf, tmp_path, monkeypatch):
+    from pdfcancel import convert, llm, multimodal
+
+    events: list[str] = []
+    monkeypatch.setattr(llm, "vlm_ocr_pdf", _fake_vlm_ocr(_ocr_markdown(), events))
+
+    def boom(*a, **kw):
+        raise RuntimeError("describer down")
+    monkeypatch.setattr(multimodal, "describe_images", boom)
+    with pytest.raises(RuntimeError):
+        convert.convert_single(pdf, _vlm_settings(), output_dir=tmp_path / "o", full=True,
+                               extract_images=True)
+    assert "cleanup" not in events
+
+
+def test_malformed_reply_is_a_per_image_failure(pdf, tmp_path, monkeypatch):
+    """chat_vision's SystemExit on a bad reply must not abort the conversion."""
+    from pdfcancel import convert, llm
+
+    monkeypatch.setattr(llm, "vlm_ocr_pdf", _fake_vlm_ocr(_ocr_markdown()))
+    calls = []
+
+    def flaky(settings, *, image_bytes, prompt, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise SystemExit("Error: unexpected chat/completions response shape")
+        return "ok description"
+    monkeypatch.setattr(llm, "chat_vision", flaky)
+    out = convert.convert_single(pdf, _vlm_settings(ocr_concurrency=1), output_dir=tmp_path / "o",
+                                 full=True, extract_images=True)
+    assert out.read_text().count("**Figure description:** ok description") == 1
+
+
+def test_failed_descriptions_are_never_cached(pdf, tmp_path, monkeypatch):
+    from pdfcancel import convert, llm
+    from pdfcancel.convert import load_manifest
+
+    monkeypatch.setattr(llm, "vlm_ocr_pdf", _fake_vlm_ocr(_ocr_markdown()))
+
+    def down(settings, **kw):
+        raise RuntimeError("timeout")
+    monkeypatch.setattr(llm, "chat_vision", down)
+    out_dir = tmp_path / "o"
+    convert.convert_single(pdf, _vlm_settings(), output_dir=out_dir, full=True, extract_images=True)
+    assert "image_descriptions" not in load_manifest(out_dir)["doc"]
+
+    # A failure cached by an older version is ignored, and the figure retried.
+    manifest = load_manifest(out_dir)
+    from pdfcancel.multimodal import cacheable_descriptions  # noqa: F401
+    import hashlib
+    _, images = figures.extract_figures(pdf, _ocr_markdown())
+    manifest["doc"]["image_descriptions"] = {
+        hashlib.sha256(b).hexdigest()[:16]: "[Image description unavailable: old]"
+        for b in images.values()
+    }
+    from pdfcancel.convert import save_manifest
+    save_manifest(out_dir, manifest)
+    monkeypatch.setattr(llm, "chat_vision", lambda settings, **kw: "fresh")
+    out = convert.convert_single(pdf, _vlm_settings(), output_dir=out_dir, full=True,
+                                 extract_images=True, force=True)
+    assert out.read_text().count("**Figure description:** fresh") == 2
+
+
+def test_stop_during_descriptions_saves_partial_and_keeps_cache(pdf, tmp_path, monkeypatch):
+    import threading
+
+    from pdfcancel import convert, llm
+    from pdfcancel.convert import load_manifest
+    from pdfcancel.errors import ConversionIncomplete
+
+    events: list[str] = []
+    monkeypatch.setattr(llm, "vlm_ocr_pdf", _fake_vlm_ocr(_ocr_markdown(), events))
+    stop = threading.Event()
+
+    def first_then_stop(settings, **kw):
+        stop.set()  # Ctrl-C arrives while the first figure is in flight
+        return "first"
+    monkeypatch.setattr(llm, "chat_vision", first_then_stop)
+    out_dir = tmp_path / "o"
+    with pytest.raises(ConversionIncomplete) as ei:
+        convert.convert_single(pdf, _vlm_settings(ocr_concurrency=1), output_dir=out_dir,
+                               full=True, extract_images=True, stop=stop)
+    assert ei.value.interrupted and "1/2 figure(s)" in str(ei.value)
+    assert list(load_manifest(out_dir)["doc"]["image_descriptions"].values()) == ["first"]
+    assert "cleanup" not in events and not (out_dir / "doc.md").exists()
+
+
+def test_vlm_descriptions_run_concurrently(monkeypatch):
+    import threading
+    import time
+
+    from pdfcancel import llm, multimodal
+
+    active = peak = 0
+    lock = threading.Lock()
+
+    def slow(settings, **kw):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with lock:
+            active -= 1
+        return "d"
+    monkeypatch.setattr(llm, "chat_vision", slow)
+    images = {f"p001-f{i:02d}.png": bytes([i]) * 8 for i in range(1, 9)}
+    out = multimodal.describe_images(images, _vlm_settings(ocr_concurrency=4))
+    assert set(out.values()) == {"d"} and len(out) == 8
+    assert 1 < peak <= 4

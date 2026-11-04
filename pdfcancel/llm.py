@@ -251,6 +251,7 @@ def vlm_ocr_pdf(
     preserve_pages: bool = False,
     cache_dir: Path | None = None,
     stop: Event | None = None,
+    keep_cache: bool = False,
 ) -> OcrResult:
     """OCR a PDF with the vlm engine: rasterize pages, transcribe, assemble.
 
@@ -266,7 +267,10 @@ def vlm_ocr_pdf(
 
     If any page is still missing at the end (interrupted or failed), raises
     :class:`~pdfcancel.errors.ConversionIncomplete` without assembling output,
-    leaving the cache in place to resume. On full success the cache is removed.
+    leaving the cache in place to resume. On full success the cache is removed,
+    unless ``keep_cache`` is set: then ``OcrResult.cleanup`` removes it, and the
+    caller runs that once later, failure-prone steps (figure descriptions)
+    have finished and the output is written.
 
     ``images`` is always empty: page transcription does not produce cropped
     figure images (that is a ``mistral``-engine feature).
@@ -394,6 +398,10 @@ def vlm_ocr_pdf(
         )
 
     markdown = join_pages(page_markdowns, preserve_pages=preserve_pages)
+    result = OcrResult(markdown=markdown, images={}, page_markdowns=page_markdowns)
     if cache is not None:
-        cache.cleanup()
-    return OcrResult(markdown=markdown, images={}, page_markdowns=page_markdowns)
+        if keep_cache:
+            result.cleanup = cache.cleanup  # caller removes it after writing output
+        else:
+            cache.cleanup()
+    return result

@@ -107,13 +107,10 @@ def enhance_markdown(
                 )
                 markdown_content = inject_descriptions(markdown_content, descriptions)
 
-                # Update manifest cache
-                import hashlib
-                desc_cache = cached.copy()
-                for img_id, img_bytes in undescribed.items():
-                    h = hashlib.sha256(img_bytes).hexdigest()[:16]
-                    if img_id in descriptions:
-                        desc_cache[h] = descriptions[img_id]
+                # Update manifest cache (never caching failure placeholders)
+                from pdfcancel.multimodal import cacheable_descriptions, is_unavailable
+                desc_cache = {h: d for h, d in cached.items() if not is_unavailable(d)}
+                desc_cache.update(cacheable_descriptions(undescribed, descriptions))
 
                 manifest.setdefault(stem, {})["image_descriptions"] = desc_cache
                 save_manifest(output_dir, manifest)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,9 @@ class OcrResult:
     images: dict[str, bytes] = field(default_factory=dict)
     page_markdowns: list[str] = field(default_factory=list)
     dropped_images: int = 0
+    # Deferred cleanup of an OCR checkpoint (vlm ``keep_cache=True``); the
+    # caller runs it once the converted output is safely written.
+    cleanup: Callable[[], None] | None = field(default=None, repr=False)
 
     @property
     def page_count(self) -> int:

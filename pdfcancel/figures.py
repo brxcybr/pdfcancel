@@ -15,8 +15,8 @@ recovers the figures locally with PyMuPDF so ``--images`` / ``--embed-images``
    the Mistral engine's ``{image_id: bytes}`` + ``![id](id)`` contract, so
    image extraction, embedding, and descriptions work unchanged.
 
-A scanned page (one image covering the page) with a placeholder but no
-detectable figure is rendered whole as ``pNNN-page.png`` so it still gets a
+A scanned page (one image covering the page) with a placeholder is
+rendered whole as ``pNNN-page.png`` so it still gets a
 description.
 """
 
@@ -216,12 +216,14 @@ def extract_figures(
     try:
         for page in doc:
             n = page.number + 1
-            rects, _ = detect_figures(page, include_tables=include_tables)
+            rects, scanned = detect_figures(page, include_tables=include_tables)
             pngs = [page.get_pixmap(dpi=dpi, clip=r).tobytes("png") for r in rects]
             if pngs:
                 names = [f"p{n:03d}-f{k:02d}.png" for k in range(1, len(pngs) + 1)]
-            elif placeholders.get(n):
-                # Nothing detectable (typically a scan): describe the whole page.
+            elif scanned and placeholders.get(n):
+                # A scan has no separable figures: describe the whole page. On a
+                # born-digital page, a figure every filter rejected stays a
+                # placeholder rather than costing a whole-page render.
                 pngs, names = [page.get_pixmap(dpi=dpi).tobytes("png")], [f"p{n:03d}-page.png"]
             else:
                 names = []
@@ -246,7 +248,3 @@ def extract_figures(
         out.append(text)
     return "".join(out), images
 
-
-def strip_page_markers(markdown: str) -> str:
-    """Remove page-marker lines (used when markers were only needed internally)."""
-    return re.sub(r"\n{3,}", "\n\n", PAGE_MARKER_RE.sub("", markdown)).lstrip("\n")

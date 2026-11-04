@@ -11,7 +11,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import re
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
+from threading import Event
 
 from rich.console import Console
 
@@ -22,6 +24,7 @@ from pdfcancel.charts import (
     split_chart_json,
 )
 from pdfcancel.config import Settings
+from pdfcancel.errors import DescriptionsInterrupted
 from pdfcancel.retry import with_retry
 
 console = Console()
@@ -100,12 +103,37 @@ def _build_prompt(img_id: str, markdown_content: str | None) -> str:
     )
 
 
+UNAVAILABLE_PREFIX = "[Image description unavailable"
+
+
+def is_unavailable(description: str | None) -> bool:
+    """True for a missing description or a recorded failure placeholder."""
+    return not description or description.startswith(UNAVAILABLE_PREFIX)
+
+
+def cacheable_descriptions(
+    images: dict[str, bytes], descriptions: dict[str, str],
+) -> dict[str, str]:
+    """``{content_hash: description}`` for the manifest, without failures.
+
+    A failure placeholder must never be cached: crops hash identically on every
+    run, so a cached failure would be served back forever.
+    """
+    out: dict[str, str] = {}
+    for img_id, img_bytes in images.items():
+        desc = descriptions.get(img_id)
+        if not is_unavailable(desc):
+            out[hashlib.sha256(img_bytes).hexdigest()[:16]] = desc
+    return out
+
+
 def describe_images(
     images: dict[str, bytes],
     settings: Settings,
     *,
     cached_descriptions: dict[str, str] | None = None,
     markdown_content: str | None = None,
+    stop: Event | None = None,
 ) -> dict[str, str]:
     """Send each image to a vision model and return descriptions.
 
@@ -117,30 +145,45 @@ def describe_images(
             context for each image. When provided, the vision model receives
             the ~500 chars around the image reference so it can ground its
             description in the document's terminology.
+        stop: Cooperative stop signal (SIGINT/SIGTERM). In-flight requests
+            finish; nothing new starts, and DescriptionsInterrupted is raised
+            carrying the descriptions completed so far.
 
     Returns:
-        Mapping of image ID → text description.
+        Mapping of image ID → text description. A figure that could not be
+        described maps to an ``[Image description unavailable: …]`` placeholder.
     """
     if not images:
         return {}
 
-    cached = cached_descriptions or {}
-    descriptions: dict[str, str] = {}
+    cached = {h: d for h, d in (cached_descriptions or {}).items() if not is_unavailable(d)}
 
     # The vlm engine describes figures on the same OpenAI-compatible endpoint
-    # it OCRs with; the mistral engine uses the Mistral SDK client.
+    # it OCRs with, in parallel like its page OCR; the mistral engine uses the
+    # Mistral SDK client, one image at a time.
     if settings.ocr_engine == "vlm":
         from pdfcancel.llm import chat_vision, resolve_vlm_model
         http_client = settings.build_vision_http_client()
-        model = settings.vlm_full_model or resolve_vlm_model(settings, http_client=http_client)
+        workers = max(1, settings.ocr_concurrency)
+        try:
+            model = settings.vlm_full_model or resolve_vlm_model(settings, http_client=http_client)
+        except BaseException:
+            http_client.close()
+            raise
 
         def _describe(prompt: str, data_uri: str, img_bytes: bytes, mime: str, img_id: str) -> str:
-            return chat_vision(
-                settings, image_bytes=img_bytes, prompt=prompt, model=model,
-                max_tokens=VLM_DESCRIPTION_MAX_TOKENS, mime=mime, http_client=http_client,
-            ).strip()
+            try:
+                return chat_vision(
+                    settings, image_bytes=img_bytes, prompt=prompt, model=model,
+                    max_tokens=VLM_DESCRIPTION_MAX_TOKENS, mime=mime, http_client=http_client,
+                ).strip()
+            except SystemExit as e:
+                # chat_vision reports a malformed reply via SystemExit; for one
+                # figure that is a per-image failure, not a reason to abort.
+                raise RuntimeError(str(e)) from e
     else:
         http_client = None
+        workers = 1
         client = settings.build_client()
 
         def _describe(prompt: str, data_uri: str, img_bytes: bytes, mime: str, img_id: str) -> str:
@@ -163,41 +206,63 @@ def describe_images(
             return response.choices[0].message.content.strip()
 
     try:
-        _describe_all(images, cached, descriptions, markdown_content, _describe)
+        return _describe_all(images, cached, markdown_content, _describe,
+                             workers=workers, stop=stop)
     finally:
         if http_client is not None:
             http_client.close()
-    return descriptions
 
 
-def _describe_all(images, cached, descriptions, markdown_content, describe) -> None:
-    """Fill ``descriptions`` for each image, using ``cached`` hashes when present."""
-    total = len(images)
-
-    for idx, (img_id, img_bytes) in enumerate(images.items(), 1):
+def _describe_all(images, cached, markdown_content, describe, *, workers, stop):
+    """Describe uncached images with up to ``workers`` concurrent requests."""
+    descriptions: dict[str, str] = {}
+    todo = []
+    for img_id, img_bytes in images.items():
         content_hash = hashlib.sha256(img_bytes).hexdigest()[:16]
-
-        # Use cached description if available
         if content_hash in cached:
             descriptions[img_id] = cached[content_hash]
-            continue
+        else:
+            todo.append((img_id, img_bytes))
+    total = len(todo)
 
-        # Determine MIME type from image ID extension
+    def _one(idx: int, img_id: str, img_bytes: bytes) -> str:
         ext = Path(img_id).suffix.lstrip(".").lower() or "png"
         mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
-        b64_data = base64.b64encode(img_bytes).decode("ascii")
-        data_uri = f"data:{mime};base64,{b64_data}"
-
-        # Build context-enriched prompt
+        data_uri = f"data:{mime};base64,{base64.b64encode(img_bytes).decode('ascii')}"
         prompt = _build_prompt(img_id, markdown_content)
-
         console.print(f"    [dim]Describing image {idx}/{total}: {img_id}[/dim]")
-
         try:
-            descriptions[img_id] = describe(prompt, data_uri, img_bytes, mime, img_id)
+            return describe(prompt, data_uri, img_bytes, mime, img_id)
         except Exception as e:
             console.print(f"    [yellow]Warning: Could not describe {img_id}: {e}[/yellow]")
-            descriptions[img_id] = f"[Image description unavailable: {e}]"
+            return f"{UNAVAILABLE_PREFIX}: {e}]"
+
+    interrupted = False
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        inflight = {}
+        pending = iter(enumerate(todo, 1))
+        while True:
+            while not interrupted and len(inflight) < workers:
+                if stop is not None and stop.is_set():
+                    interrupted = True
+                    break
+                try:
+                    idx, (img_id, img_bytes) = next(pending)
+                except StopIteration:
+                    break
+                inflight[pool.submit(_one, idx, img_id, img_bytes)] = img_id
+            if not inflight:
+                break
+            done, _ = wait(inflight, return_when=FIRST_COMPLETED)
+            for fut in done:
+                descriptions[inflight.pop(fut)] = fut.result()
+
+    if interrupted:
+        raise DescriptionsInterrupted(
+            descriptions=descriptions, total=len(images),
+            completed=sum(1 for d in descriptions.values() if not is_unavailable(d)),
+        )
+    return descriptions
 
 
 def inject_descriptions(
@@ -224,7 +289,7 @@ def inject_descriptions(
     doesn't already have a description block below it.
     """
     for img_id, description in descriptions.items():
-        if not description or description.startswith("[Image description unavailable"):
+        if is_unavailable(description):
             continue
 
         # Split description, optional markdown DATA table, and optional strict
@@ -313,7 +378,7 @@ def build_batch_vision_requests(
         - requests: list of dicts with custom_id, prompt, data_uri
         - cached_hits: {img_id: description} for images with cached descriptions
     """
-    cached = cached_descriptions or {}
+    cached = {h: d for h, d in (cached_descriptions or {}).items() if not is_unavailable(d)}
     requests = []
     cached_hits: dict[str, str] = {}
 
