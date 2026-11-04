@@ -19,13 +19,14 @@ class ConversionIncomplete(Exception):
         completed: int,
         failed_pages: list[int] | None = None,
         interrupted: bool = False,
+        unit: str = "page",
     ) -> None:
         self.total = total
         self.completed = completed
         self.failed_pages = failed_pages or []
         self.interrupted = interrupted
         if interrupted:
-            msg = f"interrupted after {completed}/{total} page(s); re-run to resume"
+            msg = f"interrupted after {completed}/{total} {unit}(s); re-run to resume"
         else:
             shown = ", ".join(str(p) for p in self.failed_pages[:10])
             more = " …" if len(self.failed_pages) > 10 else ""
@@ -35,3 +36,15 @@ class ConversionIncomplete(Exception):
                 "re-run to retry the missing pages"
             )
         super().__init__(msg)
+
+
+class DescriptionsInterrupted(ConversionIncomplete):
+    """A stop signal arrived while figures were being described.
+
+    ``descriptions`` holds the figures finished before the stop so the caller
+    can cache them; a re-run then describes only the rest.
+    """
+
+    def __init__(self, *, descriptions: dict[str, str], total: int, completed: int) -> None:
+        super().__init__(total=total, completed=completed, interrupted=True, unit="figure")
+        self.descriptions = descriptions

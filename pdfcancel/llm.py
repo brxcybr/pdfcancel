@@ -1,11 +1,12 @@
 """OpenAI-compatible vision backend for the ``vlm`` OCR engine.
 
 This module speaks the OpenAI ``/v1/chat/completions`` interface, so it works
-with any compatible server the user has — a local vLLM instance, the WIRE
-LiteLLM proxy, Ollama, OpenAI, or a dedicated OCR VLM. A chat model cannot
+with any compatible server the user has — a local vLLM instance, a LiteLLM
+proxy, Ollama, OpenAI, or a dedicated OCR VLM. A chat model cannot
 ingest a PDF or expose ``/v1/ocr``, so OCR here means: rasterize each page to
-an image and transcribe it to Markdown via the same ``chat_vision`` primitive
-that can later power ``--full``.
+an image and transcribe it to Markdown via the ``chat_vision`` primitive, which
+also powers ``--full`` figure descriptions (figures are cropped locally by
+``pdfcancel.figures``).
 
 The Mistral ``/v1/ocr`` fast-path lives elsewhere (the default ``mistral``
 engine); nothing in this module touches it.
@@ -89,7 +90,7 @@ def _require_api_base(settings: Settings) -> str:
         raise SystemExit(
             "Error: the 'vlm' OCR engine needs a server URL.\n"
             "  Set it with --api-base or PDFCANCEL_API_BASE, e.g.\n"
-            "  --api-base https://api.wirecui.westpoint.edu/litellm/v1"
+            "  --api-base https://your-host/litellm/v1"
         )
     return settings.api_base
 
@@ -250,6 +251,7 @@ def vlm_ocr_pdf(
     preserve_pages: bool = False,
     cache_dir: Path | None = None,
     stop: Event | None = None,
+    keep_cache: bool = False,
 ) -> OcrResult:
     """OCR a PDF with the vlm engine: rasterize pages, transcribe, assemble.
 
@@ -265,7 +267,10 @@ def vlm_ocr_pdf(
 
     If any page is still missing at the end (interrupted or failed), raises
     :class:`~pdfcancel.errors.ConversionIncomplete` without assembling output,
-    leaving the cache in place to resume. On full success the cache is removed.
+    leaving the cache in place to resume. On full success the cache is removed,
+    unless ``keep_cache`` is set: then ``OcrResult.cleanup`` removes it, and the
+    caller runs that once later, failure-prone steps (figure descriptions)
+    have finished and the output is written.
 
     ``images`` is always empty: page transcription does not produce cropped
     figure images (that is a ``mistral``-engine feature).
@@ -393,6 +398,10 @@ def vlm_ocr_pdf(
         )
 
     markdown = join_pages(page_markdowns, preserve_pages=preserve_pages)
+    result = OcrResult(markdown=markdown, images={}, page_markdowns=page_markdowns)
     if cache is not None:
-        cache.cleanup()
-    return OcrResult(markdown=markdown, images={}, page_markdowns=page_markdowns)
+        if keep_cache:
+            result.cleanup = cache.cleanup  # caller removes it after writing output
+        else:
+            cache.cleanup()
+    return result

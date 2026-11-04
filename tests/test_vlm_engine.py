@@ -259,13 +259,3 @@ def test_rasterize_pdf_smoke(tmp_path):
     assert pages[0][:8] == b"\x89PNG\r\n\x1a\n"
 
 
-# ── Engine guard in convert_single ───────────────────────────────────────────
-
-def test_convert_single_vlm_rejects_full(tmp_path):
-    from pdfcancel.convert import convert_single
-
-    pdf = tmp_path / "x.pdf"
-    pdf.write_bytes(b"%PDF-1.4\n")
-    settings = Settings(api_base="https://h/v1", ocr_engine="vlm", vlm_model="m")
-    with pytest.raises(SystemExit):
-        convert_single(pdf, settings, output_dir=tmp_path, full=True)

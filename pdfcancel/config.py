@@ -83,6 +83,12 @@ class Settings:
     vlm_model: str = field(
         default_factory=lambda: os.getenv("PDFCANCEL_VLM_MODEL", "").strip()
     )
+    # vlm engine --full: vision model for figure descriptions (defaults to
+    # vlm_model) and the DPI locally cropped figures are rendered at.
+    vlm_full_model: str = field(
+        default_factory=lambda: os.getenv("PDFCANCEL_VLM_FULL_MODEL", "").strip()
+    )
+    figure_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_FIGURE_DPI", 200))
     ocr_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_OCR_DPI", 200))
     ocr_concurrency: int = field(
         default_factory=lambda: _int_env("PDFCANCEL_OCR_CONCURRENCY", 4)

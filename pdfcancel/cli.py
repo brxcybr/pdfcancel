@@ -251,17 +251,14 @@ def cancel(
         else:
             settings.ocr_model = model
     if full_model:
-        settings.multimodal_model = full_model
+        if settings.ocr_engine == "vlm":
+            settings.vlm_full_model = full_model
+        else:
+            settings.multimodal_model = full_model
 
-    # The vlm engine produces page markdown only; figure extraction/description,
-    # --enhance, and the Mistral Batch API are mistral-engine features.
+    # The vlm engine crops figures locally (--images/--embed-images/--full);
+    # --enhance and the Mistral Batch API remain mistral-engine features.
     if settings.ocr_engine == "vlm":
-        if full or images or embed_images:
-            raise SystemExit(
-                "Error: --full/--images/--embed-images require --ocr-engine "
-                "mistral (server-cropped figures). The vlm engine produces "
-                "page markdown only."
-            )
         if enhance_md:
             raise SystemExit(
                 "Error: --enhance is a mistral-engine workflow and is not "

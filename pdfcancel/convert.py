@@ -143,28 +143,39 @@ def convert_single(
     # --embed-images). The Chonkie path only returns joined text.
     use_sdk = full or preserve_pages or extract_images or embed_images
     ocr_page_count: int | None = None
+    ocr_cleanup = None  # vlm: deferred page-cache removal, run once output is saved
 
     if settings.ocr_engine == "vlm":
         # Generic OpenAI-compatible engine: rasterize each page and transcribe
-        # it to markdown. Server-cropped figures (--images/--embed-images) and
-        # figure descriptions (--full) are mistral-engine features.
-        if full or extract_images or embed_images:
-            raise SystemExit(
-                "Error: --full/--images/--embed-images require the 'mistral' OCR "
-                "engine (server-cropped figures). The 'vlm' engine produces page "
-                "markdown only — drop those flags or use --ocr-engine mistral."
-            )
+        # it to markdown. The model returns text only, so figures for
+        # --images/--embed-images/--full are cropped locally (pdfcancel.figures),
+        # which needs page markers to place each crop on its page.
         from pdfcancel.llm import vlm_ocr_pdf
+        want_figures = full or extract_images or embed_images
         ocr_result = vlm_ocr_pdf(
             pdf_path,
             settings,
-            preserve_pages=preserve_pages,
+            preserve_pages=preserve_pages or want_figures,
             cache_dir=output_dir,
             stop=stop,
+            # Figure cropping and --full descriptions run after OCR and can
+            # fail or be interrupted; keep the paid-for page transcriptions
+            # until the output is written.
+            keep_cache=want_figures,
         )
         markdown_content = ocr_result.markdown
         raw_images = ocr_result.images
         ocr_page_count = ocr_result.page_count
+        ocr_cleanup = ocr_result.cleanup
+        if want_figures:
+            from pdfcancel.figures import extract_figures
+            from pdfcancel.pages import strip_page_markers
+            markdown_content, raw_images = extract_figures(
+                pdf_path, markdown_content, dpi=settings.figure_dpi,
+            )
+            console.print(f"    Cropped {len(raw_images)} figure(s) locally")
+            if not preserve_pages:
+                markdown_content = strip_page_markers(markdown_content)
     elif use_sdk:
         # Use mistralai SDK directly to get text, page list, and image data
         from pdfcancel.images import ocr_with_images
@@ -215,28 +226,40 @@ def convert_single(
 
     # --full: multimodal image descriptions
     if full and raw_images:
-        from pdfcancel.multimodal import describe_images, inject_descriptions
+        from pdfcancel.errors import DescriptionsInterrupted
+        from pdfcancel.multimodal import (
+            cacheable_descriptions,
+            describe_images,
+            inject_descriptions,
+        )
 
         console.print(f"  [bold]Describing[/bold] {len(raw_images)} image(s) ...")
 
         # Load cached descriptions from manifest
         cached = manifest.get(stem, {}).get("image_descriptions", {})
 
-        descriptions = describe_images(
-            raw_images,
-            settings,
-            cached_descriptions=cached,
-            markdown_content=markdown_content,
-        )
+        try:
+            descriptions = describe_images(
+                raw_images,
+                settings,
+                cached_descriptions=cached,
+                markdown_content=markdown_content,
+                stop=stop,
+            )
+        except DescriptionsInterrupted as e:
+            # Keep finished descriptions so a re-run describes only the rest
+            # (the vlm page cache is still on disk, so OCR is not repeated).
+            entry = dict(manifest.get(stem, {}))
+            entry["image_descriptions"] = {
+                **cached, **cacheable_descriptions(raw_images, e.descriptions),
+            }
+            manifest[stem] = entry
+            save_manifest(output_dir, manifest)
+            raise
         markdown_content = inject_descriptions(markdown_content, descriptions)
 
-        # Build cache for manifest: {content_hash: description}
-        import hashlib as _hl
-        desc_cache = {}
-        for img_id, img_bytes in raw_images.items():
-            h = _hl.sha256(img_bytes).hexdigest()[:16]
-            if img_id in descriptions:
-                desc_cache[h] = descriptions[img_id]
+        # Build cache for manifest: {content_hash: description}, never failures
+        desc_cache = cacheable_descriptions(raw_images, descriptions)
     else:
         desc_cache = {}
 
@@ -274,6 +297,8 @@ def convert_single(
         manifest_entry["image_descriptions"] = desc_cache
     manifest[stem] = manifest_entry
     save_manifest(output_dir, manifest)
+    if ocr_cleanup is not None:
+        ocr_cleanup()
 
     return out_path
 
@@ -511,12 +536,8 @@ def convert_batch_pipeline(
                     )
 
                 # Build desc_cache for manifest
-                import hashlib as _hl
-                desc_cache = {}
-                for img_id, img_bytes in raw_images.items():
-                    h = _hl.sha256(img_bytes).hexdigest()[:16]
-                    if img_id in descriptions:
-                        desc_cache[h] = descriptions[img_id]
+                from pdfcancel.multimodal import cacheable_descriptions
+                desc_cache = cacheable_descriptions(raw_images, descriptions)
             else:
                 desc_cache = {}
 
