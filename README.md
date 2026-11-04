@@ -84,6 +84,8 @@ MISTRAL_API_KEY=your-key-here
 | `PDFCANCEL_OCR_RETRIES` | `5` | `vlm` engine: network retry attempts per request |
 | `PDFCANCEL_OCR_BACKOFF` | `2.0` | `vlm` engine: base seconds for exponential retry backoff |
 | `PDFCANCEL_OCR_TIMEOUT` | `180` | `vlm` engine: per-request read/write timeout in seconds (connect is fixed at 15s) |
+| `PDFCANCEL_VLM_FULL_MODEL` | *(vlm model)* | `vlm` engine: vision model for `--full` figure descriptions (`--full-model`) |
+| `PDFCANCEL_FIGURE_DPI` | `200` | `vlm` engine: DPI that locally cropped figures are rendered at |
 
 ### Choosing an OCR engine (`--ocr-engine`)
 
@@ -96,17 +98,23 @@ Point the `vlm` engine at your server with `--api-base` (this implies `--ocr-eng
 
 ```bash
 pdfcancel ./refs/ \
-  --api-base https://api.wirecui.westpoint.edu/litellm/v1 \
-  --model <gemma4-model-id> \
+  --api-base https://your-host/litellm/v1 \
+  --model <model-alias> \
   --chunks --preserve-pages \
   --ca-bundle ~/your-internal-ca.pem
 ```
 
 - **Recommended endpoint:** a LiteLLM proxy ("one API to rule them all") fronts every model behind a single OpenAI-compatible URL. Because a proxy exposes many models, you **must** name one with `--model` (or `PDFCANCEL_VLM_MODEL`); auto-detection only works when the endpoint serves exactly one model. Direct per-model URLs (e.g. `.../vllm-gemma4/v1`) work too.
+- **LiteLLM model names:** a LiteLLM proxy routes by its own **alias** (e.g. `gemma-4-31B-it`), not the backend's Hugging Face id (`google/gemma-4-31B-it`). Sending the HF id returns `400 Invalid model name`. List aliases with `GET /v1/models`, and alias → backend with `GET /model/info`. A direct vLLM URL wants the HF id instead.
 - **Auth:** most vLLM servers accept any token; the default is `EMPTY`. Override with `--api-key` / `PDFCANCEL_API_KEY` if your gateway requires one.
 - **Tuning:** `--ocr-dpi` (default 200) trades rasterization sharpness for tokens/latency; `--ocr-concurrency` (default 4) sets how many pages are transcribed in parallel.
 - **TLS:** the `vlm` engine reuses the shared CA bundle (`--ca-bundle` / `MISTRAL_CA_BUNDLE`) for internal/self-signed certificates — see below.
-- **Scope:** the `vlm` engine produces page markdown plus `--chunks` and `--preserve-pages`. Server-cropped figures (`--images` / `--embed-images`), figure descriptions (`--full`), and the Mistral Batch API (`--batch`) remain `mistral`-engine features; combining them with `--ocr-engine vlm` exits with a clear message.
+- **Figures (`--images` / `--embed-images` / `--full`):** a chat model returns only text, so pdfcancel crops figures **locally** with PyMuPDF (`pdfcancel/figures.py`). It detects embedded images and vector drawing clusters (most charts), grows each crop to include nearby axis and legend labels, and skips running headers, repeated logos, ruled tables, and shaded code/text boxes. Crops land in `<name>_images/pNNN-fKK.png` in place of the OCR's figure placeholders. `--full` then describes each crop on the **same** endpoint (`--full-model` / `PDFCANCEL_VLM_FULL_MODEL`, defaulting to the OCR model), so the whole pipeline stays on your network:
+  ```bash
+  pdfcancel paper.pdf --api-base https://your-host/litellm/v1 --model <ocr-alias> \
+    --full --full-model <vision-alias> --preserve-pages --chunks --chunker hierarchical
+  ```
+- **Scope:** `--enhance` and the Mistral Batch API (`--batch`) remain `mistral`-engine features; `--enhance` with `--ocr-engine vlm` exits with a clear message.
 
 #### One-time setup for a self-hosted vlm endpoint
 
@@ -169,7 +177,7 @@ pdfcancel paper.pdf --enhance paper.md --full \
 
 - The URL is the server **root**; the SDK appends `/v1/...`, and a trailing `/v1` you include is stripped automatically (both `.../vllm-mistral` and `.../vllm-mistral/v1` work).
 - Set the served model name with `--full-model` (vision) and/or `--model` (OCR); local model IDs differ from the hosted defaults.
-- **Capability caveat:** an OpenAI-compatible server such as vLLM serves `--full` image descriptions (chat/vision) but typically does **not** implement Mistral's OCR, file-upload, or batch endpoints. The base PDF→markdown OCR step, `--images` / `--embed-images` / `--preserve-pages`, and `--batch` therefore still require Mistral's hosted API. To run `--full` entirely against a local server, use `--enhance` on documents that already have an extracted `<name>_images/` folder — pdfcancel describes those images in place without re-running OCR.
+- **Capability caveat:** an OpenAI-compatible server such as vLLM serves `--full` image descriptions (chat/vision) but typically does **not** implement Mistral's OCR, file-upload, or batch endpoints, so on the `mistral` engine the base OCR step still uses Mistral's hosted API. To run everything on a local server, use the [`vlm` engine](#choosing-an-ocr-engine---ocr-engine), which OCRs, crops figures, and runs `--full` locally. `--enhance --full` also works against a local server on documents that already have an extracted `<name>_images/` folder.
 
 **Internal / self-signed CA:** if the server's TLS certificate is issued by an internal CA that your default trust store doesn't include, point pdfcancel at a PEM bundle for that CA with `--mistral-ca-bundle` / `MISTRAL_CA_BUNDLE`. TLS verification stays **enabled**, and your system and `certifi` trust stores are left untouched (nothing is disabled or globally modified):
 
@@ -436,6 +444,7 @@ pdfcancel/
 │   ├── multimodal.py    # Context-enriched vision descriptions
 │   ├── charts.py        # Structured chart/table data + Vega-Lite helpers
 │   ├── enhance.py       # Upgrade existing markdown
+│   ├── figures.py       # Local figure detection/cropping for the vlm engine
 │   ├── chunks.py        # Figure-aware chunking + content classification
 │   ├── index.py         # SQLite FTS5 + semantic search + weighted scoring
 │   └── plugins/
@@ -472,6 +481,7 @@ pdfcancel/
 - [x] Document-level metadata propagation to all chunks
 - [x] Vega-Lite chart spec extraction from figures
 - [x] Structured data table extraction from chart images
+- [x] Local figure extraction + `--full` on the `vlm` engine (self-hosted, end-to-end)
 
 ## License
 

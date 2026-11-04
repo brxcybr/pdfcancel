@@ -1,11 +1,12 @@
 """OpenAI-compatible vision backend for the ``vlm`` OCR engine.
 
 This module speaks the OpenAI ``/v1/chat/completions`` interface, so it works
-with any compatible server the user has — a local vLLM instance, the WIRE
-LiteLLM proxy, Ollama, OpenAI, or a dedicated OCR VLM. A chat model cannot
+with any compatible server the user has — a local vLLM instance, a LiteLLM
+proxy, Ollama, OpenAI, or a dedicated OCR VLM. A chat model cannot
 ingest a PDF or expose ``/v1/ocr``, so OCR here means: rasterize each page to
-an image and transcribe it to Markdown via the same ``chat_vision`` primitive
-that can later power ``--full``.
+an image and transcribe it to Markdown via the ``chat_vision`` primitive, which
+also powers ``--full`` figure descriptions (figures are cropped locally by
+``pdfcancel.figures``).
 
 The Mistral ``/v1/ocr`` fast-path lives elsewhere (the default ``mistral``
 engine); nothing in this module touches it.
@@ -89,7 +90,7 @@ def _require_api_base(settings: Settings) -> str:
         raise SystemExit(
             "Error: the 'vlm' OCR engine needs a server URL.\n"
             "  Set it with --api-base or PDFCANCEL_API_BASE, e.g.\n"
-            "  --api-base https://api.wirecui.westpoint.edu/litellm/v1"
+            "  --api-base https://your-host/litellm/v1"
         )
     return settings.api_base
 

@@ -146,25 +146,29 @@ def convert_single(
 
     if settings.ocr_engine == "vlm":
         # Generic OpenAI-compatible engine: rasterize each page and transcribe
-        # it to markdown. Server-cropped figures (--images/--embed-images) and
-        # figure descriptions (--full) are mistral-engine features.
-        if full or extract_images or embed_images:
-            raise SystemExit(
-                "Error: --full/--images/--embed-images require the 'mistral' OCR "
-                "engine (server-cropped figures). The 'vlm' engine produces page "
-                "markdown only — drop those flags or use --ocr-engine mistral."
-            )
+        # it to markdown. The model returns text only, so figures for
+        # --images/--embed-images/--full are cropped locally (pdfcancel.figures),
+        # which needs page markers to place each crop on its page.
         from pdfcancel.llm import vlm_ocr_pdf
+        want_figures = full or extract_images or embed_images
         ocr_result = vlm_ocr_pdf(
             pdf_path,
             settings,
-            preserve_pages=preserve_pages,
+            preserve_pages=preserve_pages or want_figures,
             cache_dir=output_dir,
             stop=stop,
         )
         markdown_content = ocr_result.markdown
         raw_images = ocr_result.images
         ocr_page_count = ocr_result.page_count
+        if want_figures:
+            from pdfcancel.figures import extract_figures, strip_page_markers
+            markdown_content, raw_images = extract_figures(
+                pdf_path, markdown_content, dpi=settings.figure_dpi,
+            )
+            console.print(f"    Cropped {len(raw_images)} figure(s) locally")
+            if not preserve_pages:
+                markdown_content = strip_page_markers(markdown_content)
     elif use_sdk:
         # Use mistralai SDK directly to get text, page list, and image data
         from pdfcancel.images import ocr_with_images

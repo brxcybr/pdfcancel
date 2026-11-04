@@ -1,7 +1,8 @@
 """Multimodal image description for pdfcancel --full mode.
 
-Sends extracted images to a vision-capable model (Pixtral by default)
-to generate text descriptions of charts, figures, diagrams, and tables.
+Sends extracted images to a vision-capable model (Pixtral by default; the
+vlm engine's OpenAI-compatible model with --ocr-engine vlm) to generate text
+descriptions of charts, figures, diagrams, and tables.
 Descriptions are inserted into the markdown below each image reference.
 """
 
@@ -24,6 +25,10 @@ from pdfcancel.config import Settings
 from pdfcancel.retry import with_retry
 
 console = Console()
+
+# Output cap for a vlm-engine figure description. The structured chart payload
+# (CHART_JSON with every data point) needs far more room than prose alone.
+VLM_DESCRIPTION_MAX_TOKENS = 2048
 
 # Base prompt for the vision model.
 # When surrounding document context is available, it gets prepended to this.
@@ -120,8 +125,53 @@ def describe_images(
         return {}
 
     cached = cached_descriptions or {}
-    client = settings.build_client()
     descriptions: dict[str, str] = {}
+
+    # The vlm engine describes figures on the same OpenAI-compatible endpoint
+    # it OCRs with; the mistral engine uses the Mistral SDK client.
+    if settings.ocr_engine == "vlm":
+        from pdfcancel.llm import chat_vision, resolve_vlm_model
+        http_client = settings.build_vision_http_client()
+        model = settings.vlm_full_model or resolve_vlm_model(settings, http_client=http_client)
+
+        def _describe(prompt: str, data_uri: str, img_bytes: bytes, mime: str, img_id: str) -> str:
+            return chat_vision(
+                settings, image_bytes=img_bytes, prompt=prompt, model=model,
+                max_tokens=VLM_DESCRIPTION_MAX_TOKENS, mime=mime, http_client=http_client,
+            ).strip()
+    else:
+        http_client = None
+        client = settings.build_client()
+
+        def _describe(prompt: str, data_uri: str, img_bytes: bytes, mime: str, img_id: str) -> str:
+            response = with_retry(
+                lambda: client.chat.complete(
+                    model=settings.multimodal_model,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {"type": "image_url", "image_url": {"url": data_uri}},
+                            ],
+                        }
+                    ],
+                    max_tokens=400,
+                ),
+                description=f"vision description of {img_id}",
+            )
+            return response.choices[0].message.content.strip()
+
+    try:
+        _describe_all(images, cached, descriptions, markdown_content, _describe)
+    finally:
+        if http_client is not None:
+            http_client.close()
+    return descriptions
+
+
+def _describe_all(images, cached, descriptions, markdown_content, describe) -> None:
+    """Fill ``descriptions`` for each image, using ``cached`` hashes when present."""
     total = len(images)
 
     for idx, (img_id, img_bytes) in enumerate(images.items(), 1):
@@ -144,29 +194,10 @@ def describe_images(
         console.print(f"    [dim]Describing image {idx}/{total}: {img_id}[/dim]")
 
         try:
-            response = with_retry(
-                lambda: client.chat.complete(
-                    model=settings.multimodal_model,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": prompt},
-                                {"type": "image_url", "image_url": {"url": data_uri}},
-                            ],
-                        }
-                    ],
-                    max_tokens=400,
-                ),
-                description=f"vision description of {img_id}",
-            )
-            description = response.choices[0].message.content.strip()
-            descriptions[img_id] = description
+            descriptions[img_id] = describe(prompt, data_uri, img_bytes, mime, img_id)
         except Exception as e:
             console.print(f"    [yellow]Warning: Could not describe {img_id}: {e}[/yellow]")
             descriptions[img_id] = f"[Image description unavailable: {e}]"
-
-    return descriptions
 
 
 def inject_descriptions(
