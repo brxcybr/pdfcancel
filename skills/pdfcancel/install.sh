@@ -16,7 +16,14 @@
 #   --no-venv       don't create or update a virtualenv (use an existing one).
 #   --link          symlink the skill instead of copying it (for development
 #                   from a checkout, so edits apply immediately).
+#
+# pdfcancel itself comes from, in order: a bundle's pinned pdfcancel-src.tar.gz,
+# the surrounding checkout, or $PDFCANCEL_REPO at $PDFCANCEL_REF
+# (default https://github.com/brxcybr/pdfcancel at main).
 set -euo pipefail
+
+PDFCANCEL_REPO="${PDFCANCEL_REPO:-https://github.com/brxcybr/pdfcancel}"
+PDFCANCEL_REF="${PDFCANCEL_REF:-main}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONF="$HOME/.config/pdfcancel"
@@ -31,7 +38,7 @@ while [ $# -gt 0 ]; do
     --venv) VENV="$2"; shift 2 ;;
     --no-venv) MAKE_VENV=0; shift ;;
     --link) LINK=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 64 ;;
   esac
 done
@@ -74,7 +81,7 @@ if [ "$MAKE_VENV" = 1 ]; then
   elif [ -f "$HERE/../../pyproject.toml" ]; then
     SRC="$(cd "$HERE/../.." && pwd)"             # running from a checkout
   else
-    SRC="git+https://github.com/brxcybr/pdfcancel"
+    SRC="git+$PDFCANCEL_REPO@$PDFCANCEL_REF"
   fi
   echo "Installing pdfcancel from $SRC into $VENV ..."
   "$VENV/bin/python" -m pip install --quiet --upgrade pip
@@ -84,12 +91,15 @@ fi
 
 # 4. Skill files, shared by every agent; Claude Code reads ~/.claude/skills.
 DEST="$SKILLS/pdfcancel"
-rm -rf "$DEST"
-if [ "$LINK" = 1 ]; then
+if [ "$(cd "$DEST" 2>/dev/null && pwd -P)" = "$(cd "$HERE" && pwd -P)" ]; then
+  :  # re-run from the installed copy (or its link): files are already in place
+elif [ "$LINK" = 1 ]; then
+  rm -rf "$DEST"
   ln -s "$HERE" "$DEST"
 else
+  rm -rf "$DEST"
   mkdir -p "$DEST"
-  cp -R "$HERE/SKILL.md" "$HERE/scripts" "$HERE/profile.env.example" "$DEST/"
+  cp -R "$HERE/SKILL.md" "$HERE/scripts" "$HERE/profile.env.example" "$HERE/install.sh" "$DEST/"
 fi
 if [ -d "$HOME/.claude" ]; then
   mkdir -p "$HOME/.claude/skills"

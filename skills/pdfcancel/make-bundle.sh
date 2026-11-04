@@ -47,6 +47,8 @@ This installs pdfcancel into a virtualenv, the skill into ~/.agents/skills/pdfca
 (linked into ~/.claude/skills), the site profile into ~/.config/pdfcancel/skill.env,
 and any CA certificates in ca/ into ~/.config/pdfcancel/skill-ca.pem. It finishes
 with an endpoint check. Agents then follow SKILL.md.
+
+Source and updates: https://github.com/brxcybr/pdfcancel (skills/pdfcancel).
 EOF
 find "$B" -name __pycache__ -prune -exec rm -rf {} +
 mkdir -p "$(dirname "$OUT")"

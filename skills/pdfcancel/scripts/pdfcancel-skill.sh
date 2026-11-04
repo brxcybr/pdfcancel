@@ -14,7 +14,8 @@ set -euo pipefail
 
 PROFILE="${PDFCANCEL_SKILL_PROFILE:-$HOME/.config/pdfcancel/skill.env}"
 [ -f "$PROFILE" ] || {
-  echo "No skill profile at $PROFILE. Copy profile.env.example there and fill it in." >&2
+  echo "No skill profile at $PROFILE. Copy profile.env.example there and fill it in," >&2
+  echo "or run install.sh (see SKILL.md, \"Setup on a new workstation\")." >&2
   exit 78
 }
 set -a
@@ -28,7 +29,11 @@ set +a
 BIN="$PDFCANCEL_VENV/bin/pdfcancel"
 PY="$PDFCANCEL_VENV/bin/python"
 HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pdfcancel_skill.py"
-[ -x "$BIN" ] || { echo "pdfcancel not installed in $PDFCANCEL_VENV (run install.sh)" >&2; exit 127; }
+[ -x "$BIN" ] || {
+  echo "pdfcancel not installed in $PDFCANCEL_VENV. Run the skill's install.sh, or:" >&2
+  echo "  git clone https://github.com/brxcybr/pdfcancel && pdfcancel/skills/pdfcancel/install.sh" >&2
+  exit 127
+}
 
 export PDFCANCEL_OCR_ENGINE=vlm
 export PDFCANCEL_API_KEY="${PDFCANCEL_API_KEY:-EMPTY}"

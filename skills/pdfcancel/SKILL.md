@@ -1,7 +1,7 @@
 ---
 name: pdfcancel
 description: Convert PDFs into clean, page-cited markdown and RAG chunks with pdfcancel on a self-hosted vision model (vLLM, LiteLLM, or Ollama), including local figure extraction and AI descriptions of charts, graphs, tables, diagrams, and infographics with structured chart data. Use when extracting context from PDFs, especially figure-heavy, scanned, dense academic, or sensitive documents that must stay on your network; when the user mentions pdfcancel, --full, figure descriptions, OCR, page-level citations, or converting a reference library; when asking a local vision model about a specific PDF page; or when ordinary PDF text extraction loses tables and figure content.
-compatibility: Any agent with a shell. Needs bash, pdfcancel installed with the [vlm] extra (install.sh does this), a profile at ~/.config/pdfcancel/skill.env, and network reach to the configured endpoint.
+compatibility: Any agent with a shell. Source at https://github.com/brxcybr/pdfcancel (skills/pdfcancel). Needs bash, pdfcancel installed with the [vlm] extra (install.sh does this), a profile at ~/.config/pdfcancel/skill.env, and network reach to the configured endpoint.
 ---
 
 # pdfcancel on a self-hosted vision endpoint
@@ -22,6 +22,35 @@ The wrapper loads the site profile (`~/.config/pdfcancel/skill.env`, or
 `$PDFCANCEL_SKILL_PROFILE`): endpoint, models, token, and CA bundle. It exports
 those values so a stray `.env` can't redirect a run, and it translates model
 names into the form the endpoint accepts.
+
+## Setup on a new workstation
+
+Source: **https://github.com/brxcybr/pdfcancel** (public). The skill lives in `skills/pdfcancel/` there.
+
+If `$W check` exits `127` (pdfcancel missing) or `78` (no profile), the
+workstation isn't set up yet. **Ask the user before installing anything**,
+then do one of the following:
+
+- **Team bundle** (`pdfcancel-skill-*.tar.gz`, shared by a teammate): it ships
+  the profile and CA certificates, so nothing has to be filled in.
+  ```bash
+  tar xzf pdfcancel-skill-*.tar.gz && ./pdfcancel-skill/install.sh --profile pdfcancel-skill/profile.env
+  ```
+- **From the repository:**
+  ```bash
+  git clone https://github.com/brxcybr/pdfcancel ~/src/pdfcancel
+  ~/src/pdfcancel/skills/pdfcancel/install.sh          # creates ~/.config/pdfcancel/skill.env
+  ```
+  Then fill in `~/.config/pdfcancel/skill.env`: `PDFCANCEL_API_BASE`,
+  `PDFCANCEL_VLM_MODEL`, and, for an internal CA, `PDFCANCEL_CA_BUNDLE`. Get
+  these values from the user or their team; don't guess endpoints. Re-run
+  `install.sh --ca root.crt --ca issuing.crt` to install CA certificates.
+
+`install.sh` creates a virtualenv with `pdfcancel[vlm,chunking]`. It installs
+the skill to `~/.agents/skills/pdfcancel`, linked into `~/.claude/skills`, and
+finishes with an endpoint check. A copy of the installer stays in the skill
+directory, so later re-runs work without the repository. The source comes
+from `$PDFCANCEL_REPO` at `$PDFCANCEL_REF` (default: the URL above, `main`).
 
 ## Data-handling boundary
 
@@ -132,8 +161,8 @@ Use this when a figure is missing or ambiguous in the converted output.
 | 1 | Endpoint or validation error, or an unknown model (served models listed) | Report it; fix the profile or retry with `--force` |
 | 2 | Incomplete: interrupted, or pages failed after retries; the cache is kept | Re-run the same command |
 | 64 | Wrapper usage error | Fix the arguments |
-| 78 | No profile | Create `~/.config/pdfcancel/skill.env` from `profile.env.example` |
-| 127 | pdfcancel isn't installed in `PDFCANCEL_VENV` | Run `install.sh` |
+| 78 | No profile | See [Setup on a new workstation](#setup-on-a-new-workstation) |
+| 127 | pdfcancel isn't installed in `PDFCANCEL_VENV` | See [Setup on a new workstation](#setup-on-a-new-workstation) |
 
 ## Troubleshooting
 
