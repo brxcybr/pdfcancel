@@ -33,17 +33,36 @@ console = Console()
 
 # Transcription prompt: the page image in, clean Markdown out. Kept strict so
 # the model does not summarize, translate, or wrap the whole page in a fence.
+# Tuned to be thorough on dense academic/technical pages: the previous terse
+# prompt let the vlm engine drop text embedded in figures/charts and
+# under-transcribe long reference lists, diverging from the Mistral baseline.
 VLM_OCR_PROMPT = (
-    "You are an OCR engine. Transcribe this document page into clean, "
-    "GitHub-flavored Markdown.\n"
-    "- Preserve the natural reading order, headings, paragraphs, and lists.\n"
-    "- Render tables as Markdown tables and math as LaTeX ($...$ or $$...$$).\n"
-    "- Transcribe the text exactly; do not summarize, translate, or comment.\n"
-    "- For a figure, chart, or photo, emit a single placeholder line "
-    "`![figure](figure)` instead of inventing its contents.\n"
+    "You are a meticulous OCR engine for dense academic and technical "
+    "documents. Transcribe this page into clean, GitHub-flavored Markdown, "
+    "capturing all of its textual content completely and verbatim.\n"
+    "- Preserve the natural reading order, headings, paragraphs, and lists. "
+    "For multi-column layouts, transcribe each column fully in reading order "
+    "(left column before right).\n"
+    "- Transcribe every word exactly; do not summarize, paraphrase, truncate, "
+    "translate, or comment. Transcribe the whole page through its final line.\n"
+    "- Render tables as GitHub-flavored Markdown tables, preserving every row "
+    "and cell.\n"
+    "- Render math, symbols, and equations as LaTeX ($...$ or $$...$$).\n"
+    "- Transcribe the text inside figures, charts, diagrams, and infographics "
+    "(titles, axis labels, legends, data values, and annotations), and include "
+    "each figure's and table's caption. Use a single `![figure](figure)` "
+    "placeholder only for a purely pictorial image with no legible text; never "
+    "invent content that is not visibly present.\n"
+    "- Include footnotes, endnotes, in-text citations, and the full reference "
+    "or bibliography list.\n"
     "- Output only the page's Markdown: no surrounding code fence, no preamble, "
     "and no trailing notes."
 )
+
+# Per-page output cap. Dense academic pages (figures with embedded text, long
+# reference lists) can exceed the old 1200-token cap and get truncated
+# mid-page; give the model room to transcribe the whole page.
+VLM_OCR_MAX_TOKENS = 4096
 
 # A short fingerprint of the prompt. It is recorded in each page cache so that
 # changing the prompt automatically invalidates stale cached pages.
@@ -312,6 +331,7 @@ def vlm_ocr_pdf(
                     image_bytes=page_images[index],
                     prompt=VLM_OCR_PROMPT,
                     model=model,
+                    max_tokens=VLM_OCR_MAX_TOKENS,
                     mime="image/png",
                     http_client=client,
                 )
