@@ -441,8 +441,11 @@ ends with an endpoint check. Use `--link` to develop from a checkout.
 `skills/pdfcancel/make-bundle.sh --profile team.env --ca root.crt --ca issuing.crt`
 writes `dist/pdfcancel-skill-<sha>.tar.gz`, which contains the skill, the
 profile, the CA certificates, and a pinned pdfcancel source archive. Recipients
-run `tar xzf …` and then `./pdfcancel-skill/install.sh --profile profile.env`.
-The builder refuses a profile that contains a real API token.
+run `tar xzf …` and then `./pdfcancel-skill/install.sh`, which picks up the
+bundled profile and CA certificates on its own.
+The builder refuses a profile that contains secrets: any non-placeholder
+`*KEY*`, `*TOKEN*`, `*SECRET*`, or `*PASS*` value, or a URL with embedded
+credentials.
 
 ## Development
 

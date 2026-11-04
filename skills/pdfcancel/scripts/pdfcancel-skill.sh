@@ -38,6 +38,10 @@ HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pdfcancel_skill.py"
 export PDFCANCEL_OCR_ENGINE=vlm
 export PDFCANCEL_API_KEY="${PDFCANCEL_API_KEY:-EMPTY}"
 export MISTRAL_API_KEY=""  # never send a hosted Mistral key anywhere from this skill
+# Fall back to the CA bundle install.sh writes, if the profile names none.
+if [ -z "${PDFCANCEL_CA_BUNDLE:-}" ] && [ -f "$HOME/.config/pdfcancel/skill-ca.pem" ]; then
+  PDFCANCEL_CA_BUNDLE="$HOME/.config/pdfcancel/skill-ca.pem"
+fi
 if [ -n "${PDFCANCEL_CA_BUNDLE:-}" ]; then
   [ -f "$PDFCANCEL_CA_BUNDLE" ] || { echo "CA bundle missing: $PDFCANCEL_CA_BUNDLE" >&2; exit 1; }
   export MISTRAL_CA_BUNDLE="$PDFCANCEL_CA_BUNDLE"

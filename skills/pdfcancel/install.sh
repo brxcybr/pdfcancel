@@ -5,8 +5,9 @@
 #   ./install.sh [--profile FILE] [--ca CERT]... [--venv DIR] [--no-venv] [--link]
 #
 #   --profile FILE  site profile to install as ~/.config/pdfcancel/skill.env
-#                   (an existing one is backed up). Default: keep the current
-#                   profile, or start from profile.env.example.
+#                   (an existing one is backed up). Default: a bundle's
+#                   profile.env, else keep the current profile, else start from
+#                   profile.env.example.
 #   --ca CERT       CA certificate(s) concatenated into
 #                   ~/.config/pdfcancel/skill-ca.pem (repeatable). A bundle's
 #                   ca/ directory is used automatically.
@@ -43,6 +44,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -d "$HERE/ca" ] && for c in "$HERE"/ca/*; do [ -f "$c" ] && CAS+=("$c"); done
+[ -z "$PROFILE_SRC" ] && [ -f "$HERE/profile.env" ] && PROFILE_SRC="$HERE/profile.env"
 
 mkdir -p "$CONF" "$SKILLS"
 
@@ -60,6 +62,16 @@ chmod 600 "$CONF/skill.env"
 if [ ${#CAS[@]} -gt 0 ]; then
   cat ${CAS[@]+"${CAS[@]}"} > "$CONF/skill-ca.pem"
   echo "Wrote $CONF/skill-ca.pem from ${#CAS[@]} certificate file(s)."
+  # Point the profile at it unless it already names a CA file that exists here
+  # (a builder's absolute path from another machine does not count).
+  CURRENT="$( set -a; . "$CONF/skill.env"; echo "${PDFCANCEL_CA_BUNDLE:-}" )"
+  if [ -z "$CURRENT" ] || [ ! -f "$CURRENT" ]; then
+    grep -v '^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}PDFCANCEL_CA_BUNDLE=' "$CONF/skill.env" > "$CONF/skill.env.tmp" || true
+    printf 'PDFCANCEL_CA_BUNDLE="$HOME/.config/pdfcancel/skill-ca.pem"\n' >> "$CONF/skill.env.tmp"
+    mv "$CONF/skill.env.tmp" "$CONF/skill.env"
+    chmod 600 "$CONF/skill.env"
+    echo "Set PDFCANCEL_CA_BUNDLE in $CONF/skill.env to that file."
+  fi
 fi
 
 # 3. Virtualenv with pdfcancel[vlm,chunking].

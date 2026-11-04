@@ -6,7 +6,8 @@
 # The bundle holds the skill, the site profile, any CA certificates, and a
 # pinned pdfcancel source archive (git HEAD), so recipients only run:
 #   tar xzf bundle.tar.gz && ./pdfcancel-skill/install.sh
-# The profile should not contain personal secrets: recipients get it as-is.
+# (install.sh picks up the bundled profile.env and ca/ on its own.)
+# Recipients get the profile as-is, so the builder refuses one carrying secrets.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,9 +22,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 [ -f "$PROFILE" ] || { echo "usage: $0 --profile site.env [--ca CERT]... [-o out.tar.gz]" >&2; exit 64; }
-KEY="$( set -a; . "$PROFILE"; echo "${PDFCANCEL_API_KEY:-EMPTY}" )"
-if [ "$KEY" != "EMPTY" ]; then
-  echo "Refusing: $PROFILE sets a real PDFCANCEL_API_KEY. Recipients should add their own." >&2
+# Refuse anything secret-shaped: a non-placeholder value for any *KEY*,
+# *TOKEN*, *SECRET*, *PASS* variable, or any URL with embedded credentials.
+VARS="$(sed -nE 's/^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=.*/\2/p' "$PROFILE" | sort -u)"
+BAD=""
+for v in $VARS; do
+  val="$( set -a; . "$PROFILE"; eval "printf '%s' \"\${$v:-}\"" )"
+  case "$(printf '%s' "$v" | tr '[:lower:]' '[:upper:]')" in
+    *KEY*|*TOKEN*|*SECRET*|*PASS*)
+      case "$val" in ""|EMPTY|none|NONE) ;; *) BAD="$BAD $v" ;; esac ;;
+  esac
+  printf '%s' "$val" | grep -Eq '://[^/@[:space:]]+@' && BAD="$BAD $v(url-credentials)"
+done
+if [ -n "$BAD" ]; then
+  echo "Refusing: $PROFILE carries secrets:$BAD. Recipients should add their own." >&2
   exit 65
 fi
 OUT="${OUT:-$REPO/dist/pdfcancel-skill-$(git -C "$REPO" rev-parse --short HEAD).tar.gz}"
@@ -41,9 +53,9 @@ cat > "$B/INSTALL.md" <<EOF
 
 Built $(date +%Y-%m-%d) from pdfcancel $(git -C "$REPO" rev-parse --short HEAD).
 
-    ./install.sh --profile profile.env
+    ./pdfcancel-skill/install.sh
 
-This installs pdfcancel into a virtualenv, the skill into ~/.agents/skills/pdfcancel
+(from the directory you extracted into). This installs pdfcancel into a virtualenv, the skill into ~/.agents/skills/pdfcancel
 (linked into ~/.claude/skills), the site profile into ~/.config/pdfcancel/skill.env,
 and any CA certificates in ca/ into ~/.config/pdfcancel/skill-ca.pem. It finishes
 with an endpoint check. Agents then follow SKILL.md.

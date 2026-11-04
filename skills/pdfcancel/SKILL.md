@@ -34,7 +34,7 @@ then do one of the following:
 - **Team bundle** (`pdfcancel-skill-*.tar.gz`, shared by a teammate): it ships
   the profile and CA certificates, so nothing has to be filled in.
   ```bash
-  tar xzf pdfcancel-skill-*.tar.gz && ./pdfcancel-skill/install.sh --profile pdfcancel-skill/profile.env
+  tar xzf pdfcancel-skill-*.tar.gz && ./pdfcancel-skill/install.sh
   ```
 - **From the repository:**
   ```bash
