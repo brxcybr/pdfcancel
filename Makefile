@@ -5,7 +5,7 @@
 # so we use a standard install and reinstall after changes.
 
 VENV := .venv
-PIP := $(VENV)/bin/pip
+PIP := $(VENV)/bin/python3.12 -m pip  # not bin/pip: its shebang breaks if the venv moves
 PYTHON := $(VENV)/bin/python3.12
 PDFCANCEL := $(VENV)/bin/pdfcancel
 
