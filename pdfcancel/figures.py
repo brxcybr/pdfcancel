@@ -27,10 +27,15 @@ import hashlib
 import re
 from collections import Counter
 from collections.abc import Iterable
+from typing import NamedTuple
 
 from pdfcancel.pages import PAGE_MARKER_RE
 
 PLACEHOLDER_RE = re.compile(r"!\[figure\]\(figure\)")
+_CAPTION = r"(?:fig(?:ure)?|chart|exhibit|plate)\.?\s*(\d+[a-z]?)\b"
+CAPTION_RE = re.compile(r"\s*" + _CAPTION, re.IGNORECASE)               # text-layer block
+CAPTION_LINE_RE = re.compile(r"^[ \t>*_#]*" + _CAPTION, re.IGNORECASE | re.MULTILINE)
+CAPTION_REACH = 40         # pt between a figure and its printed caption
 
 MIN_AREA = 0.02            # of page area
 MIN_W, MIN_H = 0.12, 0.05  # of page width / height
@@ -76,6 +81,18 @@ def _merge(rects: Iterable, gap: float = 6) -> list:
                 out.append(pymupdf.Rect(r))
         rects = out
     return rects
+
+
+def _has_listing(lines: list, *, margin: float = 2.5) -> bool:
+    """True when two or more lines stack at one left margin, line after line."""
+    lines = sorted(lines, key=lambda r: (r.y0, r.x0))
+    for i, a in enumerate(lines):
+        for b in lines[i + 1:]:
+            if b.y0 - a.y1 > 1.5 * a.height:
+                break
+            if abs(b.x0 - a.x0) <= margin and b.y0 >= a.y1 - 0.5 * a.height:
+                return True
+    return False
 
 
 def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
@@ -149,21 +166,31 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
 
     # Spec/API documents draw request, header, and JSON callouts as vector
     # boxes with decorative marks (method badges, rules) that defeat the mark
-    # count above. Their tell is monospace text; across 1,235 reference pages,
-    # real vector figures carried none.
-    spans = [
-        (pymupdf.Rect(sp["bbox"]), sp) for b in blocks for ln in b["lines"]
-        for sp in ln["spans"] if sp["text"].strip()
-    ]
+    # count above. Their tell is monospace text laid out as a listing: lines
+    # stacked at one left margin. A diagram may label its nodes in monospace,
+    # but those labels sit apart, one per node.
+    def is_mono(sp: dict) -> bool:
+        return bool(sp["flags"] & 8 or MONO_FONT_RE.search(sp["font"]))
 
     def is_code_box(r) -> bool:
         if any((r & i).get_area() >= 0.2 * r.get_area() for i in images):
             return False
-        inside = [sp for sr, sp in spans if sr in r]
-        chars = sum(len(sp["text"]) for sp in inside)
-        mono = sum(len(sp["text"]) for sp in inside
-                   if sp["flags"] & 8 or MONO_FONT_RE.search(sp["font"]))
-        return chars >= 20 and mono >= CODE_BOX_MONO * chars
+        chars = mono = 0
+        mono_lines = []
+        for b in blocks:
+            for ln in b["lines"]:
+                lr = pymupdf.Rect(ln["bbox"])
+                if lr not in r:
+                    continue
+                spans = [sp for sp in ln["spans"] if sp["text"].strip()]
+                n = sum(len(sp["text"]) for sp in spans)
+                m = sum(len(sp["text"]) for sp in spans if is_mono(sp))
+                chars, mono = chars + n, mono + m
+                if n and m >= CODE_BOX_MONO * n:
+                    mono_lines.append(lr)
+        if chars < 20 or mono < CODE_BOX_MONO * chars:
+            return False
+        return _has_listing(mono_lines)
 
     rects = [r for r in rects if not is_text_box(r) and not is_code_box(r)]
 
@@ -232,24 +259,24 @@ def extract_figures(
     placeholders = {n: len(PLACEHOLDER_RE.findall(t)) for n, t in sections if n}
 
     # Render everything first so crops repeated across pages (logos) can be dropped.
-    crops: dict[int, list[tuple[str, bytes]]] = {}
+    crops: dict[int, list[_Crop]] = {}
     seen: Counter[str] = Counter()
     try:
         for page in doc:
             n = page.number + 1
             rects, scanned = detect_figures(page, include_tables=include_tables)
-            pngs = [page.get_pixmap(dpi=dpi, clip=r).tobytes("png") for r in rects]
-            if pngs:
-                names = [f"p{n:03d}-f{k:02d}.png" for k in range(1, len(pngs) + 1)]
-            elif scanned and placeholders.get(n):
+            crops[n] = [
+                _Crop(f"p{n:03d}-f{k:02d}.png", page.get_pixmap(dpi=dpi, clip=r).tobytes("png"),
+                      *_crop_info(page, r))
+                for k, r in enumerate(rects, 1)
+            ]
+            if not rects and scanned and placeholders.get(n):
                 # A scan has no separable figures: describe the whole page. On a
                 # born-digital page, a figure every filter rejected stays a
                 # placeholder rather than costing a whole-page render.
-                pngs, names = [page.get_pixmap(dpi=dpi).tobytes("png")], [f"p{n:03d}-page.png"]
-            else:
-                names = []
-            crops[n] = list(zip(names, pngs))
-            for h in {hashlib.sha256(b).hexdigest() for b in pngs}:
+                crops[n] = [_Crop(f"p{n:03d}-page.png",
+                                  page.get_pixmap(dpi=dpi).tobytes("png"), True, None)]
+            for h in {hashlib.sha256(c.png).hexdigest() for c in crops[n]}:
                 seen[h] += 1
     finally:
         doc.close()
@@ -258,14 +285,80 @@ def extract_figures(
     images: dict[str, bytes] = {}
     out = []
     for n, text in sections:
-        figs = [(name, b) for name, b in crops.get(n, []) if n
-                and hashlib.sha256(b).hexdigest() not in repeated]
-        refs = [f"![{name}]({name})" for name, _ in figs]
-        images.update(figs)
-        queue = list(refs)
-        text = PLACEHOLDER_RE.sub(lambda m: queue.pop(0) if queue else m.group(0), text)
-        if queue:  # more figures than placeholders: append at the page's end
-            text = text.rstrip("\n") + "\n\n" + "\n\n".join(queue) + "\n\n"
-        out.append(text)
+        figs = [c for c in crops.get(n, []) if n
+                and hashlib.sha256(c.png).hexdigest() not in repeated]
+        images.update((c.name, c.png) for c in figs)
+        out.append(_place(text, figs))
     return "".join(out), images
+
+
+class _Crop(NamedTuple):
+    name: str
+    png: bytes
+    pictorial: bool        # mostly raster with no text layer: an OCR placeholder's kind
+    number: str | None     # figure number from the caption printed beside it
+
+    @property
+    def ref(self) -> str:
+        return f"![{self.name}]({self.name})"
+
+
+def _crop_info(page, r) -> tuple[bool, str | None]:
+    """``(pictorial, caption number)`` for a figure rect, from the text layer."""
+    pymupdf = _pymupdf()
+    raster = sum((pymupdf.Rect(i["bbox"]) & r).get_area() for i in page.get_image_info())
+    words = page.get_text("words", clip=r)
+    pictorial = raster >= 0.5 * r.get_area() and sum(len(w[4]) for w in words) < 30
+    best = None
+    for b in page.get_text("blocks"):
+        br, text = pymupdf.Rect(b[:4]), b[4]
+        m = CAPTION_RE.match(text)
+        if not m or br.x1 < r.x0 or br.x0 > r.x1:
+            continue
+        gap = br.y0 - r.y1 if br.y0 >= r.y1 - 4 else r.y0 - br.y1
+        if -4 <= gap <= CAPTION_REACH and (best is None or gap < best[0]):
+            best = (gap, m.group(1).lower())
+    return pictorial, best and best[1]
+
+
+def _place(text: str, figs: list[_Crop]) -> str:
+    """Link a page's crops into its markdown.
+
+    The OCR prompt asks for placeholders only for purely pictorial images, so
+    crops and placeholders need not correspond one-to-one. A crop whose
+    printed caption ("Figure 3") appears in the markdown goes at that caption,
+    taking the placeholder just above it if there is one. The rest fill the
+    remaining placeholders in order when the counts agree; otherwise only
+    pictorial crops do. Anything still unplaced is appended at the page's end.
+    """
+    holders = [m.span() for m in PLACEHOLDER_RE.finditer(text)]
+    captions: dict[str, int] = {}
+    for m in CAPTION_LINE_RE.finditer(text):
+        captions.setdefault(m.group(1).lower(), m.start())
+    taken: dict[int, str] = {}          # placeholder index -> ref
+    inserts: list[tuple[int, str]] = []  # (offset, ref)
+    rest = []
+    for c in figs:
+        at = captions.get(c.number) if c.number else None
+        if at is None:
+            rest.append(c)
+            continue
+        prev = [i for i, (_, end) in enumerate(holders) if end <= at and i not in taken
+                and not any(end <= o < at for o in captions.values())]
+        if prev:
+            taken[prev[-1]] = c.ref
+        else:
+            inserts.append((at, c.ref + "\n\n"))
+    free = [i for i in range(len(holders)) if i not in taken]
+    fill = rest if len(free) == len(rest) else [c for c in rest if c.pictorial]
+    for i, c in zip(free, fill):
+        taken[i] = c.ref
+        rest.remove(c)
+
+    edits = [(*holders[i], ref) for i, ref in taken.items()] + [(o, o, s) for o, s in inserts]
+    for start, end, s in sorted(edits, reverse=True):
+        text = text[:start] + s + text[end:]
+    if rest:
+        text = text.rstrip("\n") + "\n\n" + "\n\n".join(c.ref for c in rest) + "\n\n"
+    return text
 

@@ -387,3 +387,53 @@ def test_skips_api_callout_with_monospace_text(tmp_path):
 def test_keeps_vector_chart_with_proportional_labels(pdf):
     # The page-1 chart's labels use a proportional font; it must survive.
     assert len(figures.detect_figures(pymupdf.open(str(pdf))[0])[0]) == 1
+
+
+def test_keeps_diagram_with_monospace_node_labels(tmp_path):
+    """Two connected nodes labelled in monospace are a diagram, not a code listing."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    for x, label in ((100, "client_process"), (360, "server_process")):
+        p.draw_rect(pymupdf.Rect(x, 250, x + 150, 320), color=(0, 0, 0), width=1)
+        p.insert_text((x + 22, 290), label, fontsize=10, fontname="cour")
+    p.draw_line((250, 285), (360, 285))
+    p.draw_polyline([(350, 280), (360, 285), (350, 290)])
+    path = tmp_path / "diagram.pdf"
+    doc.save(str(path))
+    assert len(figures.detect_figures(pymupdf.open(str(path))[0])[0]) == 1
+
+
+def _chart_then_photo_pdf(path: Path, *, captions: bool) -> Path:
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    for i, h in enumerate((60, 110, 80)):  # vector bar chart with labels
+        x = 150 + i * 80
+        p.draw_rect(pymupdf.Rect(x, 300 - h, x + 50, 300), color=(0, 0, 0), fill=(0.3, 0.3, 0.3))
+    p.draw_line((140, 300), (420, 300))
+    for i, label in enumerate(("North", "South", "West")):
+        p.insert_text((155 + i * 80, 314), label, fontsize=9)
+    p.insert_image(pymupdf.Rect(170, 420, 440, 600), stream=_png())  # a photograph
+    if captions:
+        p.insert_text((150, 345), "Figure 1: Sales by region.", fontsize=9)
+        p.insert_text((170, 625), "Figure 2: The warehouse.", fontsize=9)
+    doc.save(str(path))
+    return path
+
+
+def test_text_chart_does_not_take_the_photos_placeholder(tmp_path):
+    path = _chart_then_photo_pdf(tmp_path / "cp.pdf", captions=True)
+    md = join_pages(["North South West\n\nFigure 1: Sales by region.\n\n"
+                     "![figure](figure)\n\nFigure 2: The warehouse."], preserve_pages=True)
+    md, images = figures.extract_figures(path, md)
+    assert len(images) == 2
+    chart, photo = "![p001-f01.png](p001-f01.png)", "![p001-f02.png](p001-f02.png)"
+    assert md.index(chart) < md.index("Figure 1:") < md.index(photo) < md.index("Figure 2:")
+    assert "![figure](figure)" not in md
+
+
+def test_uncaptioned_placeholder_goes_to_the_pictorial_crop(tmp_path):
+    path = _chart_then_photo_pdf(tmp_path / "cp.pdf", captions=False)
+    md = join_pages(["North South West\n\n![figure](figure)\n\nThe end."], preserve_pages=True)
+    md, _ = figures.extract_figures(path, md)
+    photo, chart = "![p001-f02.png](p001-f02.png)", "![p001-f01.png](p001-f01.png)"
+    assert md.index(photo) < md.index("The end.") < md.index(chart)  # chart appended
