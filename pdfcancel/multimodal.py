@@ -20,6 +20,7 @@ from rich.console import Console
 from pdfcancel.charts import (
     chart_data_comment,
     chart_prompt_instructions,
+    ground_chart,
     render_chart_data_markdown,
     split_chart_json,
 )
@@ -58,15 +59,32 @@ _BASE_PROMPT = (
 
 # Context window: chars before/after the image reference to extract
 _CONTEXT_WINDOW = 500
+_PRINTED_MAX_CHARS = 4000
 
 
-def _build_prompt(img_id: str, markdown_content: str | None) -> str:
+def _build_prompt(img_id: str, markdown_content: str | None, printed: str | None = None) -> str:
     """Build a context-enriched prompt for a specific image.
 
     If markdown_content is provided, extracts the surrounding text around
     the image reference and includes it so the vision model can ground
-    its description in the document's terminology and framing.
+    its description in the document's terminology and framing. ``printed``
+    (the PDF text layer inside the figure) supplies its exact labels and values.
     """
+    return _base_prompt(img_id, markdown_content) + _printed_section(printed)
+
+
+def _printed_section(printed: str | None) -> str:
+    if not printed:
+        return ""
+    return (
+        "\n\nTEXT PRINTED INSIDE THIS FIGURE (exact strings from the PDF):\n"
+        f'"""\n{printed[:_PRINTED_MAX_CHARS]}\n"""\n'
+        "Use these exact strings for labels, names, and values. A number "
+        "missing from them was not printed, so any value for it is estimated."
+    )
+
+
+def _base_prompt(img_id: str, markdown_content: str | None) -> str:
     if not markdown_content:
         return (
             "You are analyzing an image extracted from an academic or "
@@ -134,6 +152,7 @@ def describe_images(
     cached_descriptions: dict[str, str] | None = None,
     markdown_content: str | None = None,
     stop: Event | None = None,
+    printed_text: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Send each image to a vision model and return descriptions.
 
@@ -148,6 +167,8 @@ def describe_images(
         stop: Cooperative stop signal (SIGINT/SIGTERM). In-flight requests
             finish; nothing new starts, and DescriptionsInterrupted is raised
             carrying the descriptions completed so far.
+        printed_text: ``{image_id: text}`` printed inside each figure (its PDF
+            text layer), given to the model as the exact labels and values.
 
     Returns:
         Mapping of image ID → text description. A figure that could not be
@@ -207,13 +228,14 @@ def describe_images(
 
     try:
         return _describe_all(images, cached, markdown_content, _describe,
-                             workers=workers, stop=stop)
+                             workers=workers, stop=stop, printed_text=printed_text)
     finally:
         if http_client is not None:
             http_client.close()
 
 
-def _describe_all(images, cached, markdown_content, describe, *, workers, stop):
+def _describe_all(images, cached, markdown_content, describe, *, workers, stop,
+                  printed_text=None):
     """Describe uncached images with up to ``workers`` concurrent requests."""
     descriptions: dict[str, str] = {}
     todo = []
@@ -229,7 +251,7 @@ def _describe_all(images, cached, markdown_content, describe, *, workers, stop):
         ext = Path(img_id).suffix.lstrip(".").lower() or "png"
         mime = f"image/{'jpeg' if ext in ('jpg', 'jpeg') else ext}"
         data_uri = f"data:{mime};base64,{base64.b64encode(img_bytes).decode('ascii')}"
-        prompt = _build_prompt(img_id, markdown_content)
+        prompt = _build_prompt(img_id, markdown_content, (printed_text or {}).get(img_id))
         console.print(f"    [dim]Describing image {idx}/{total}: {img_id}[/dim]")
         try:
             return describe(prompt, data_uri, img_bytes, mime, img_id)
@@ -268,6 +290,7 @@ def _describe_all(images, cached, markdown_content, describe, *, workers, stop):
 def inject_descriptions(
     markdown_content: str,
     descriptions: dict[str, str],
+    printed_text: dict[str, str] | None = None,
 ) -> str:
     """Insert image descriptions into markdown below each image reference.
 
@@ -286,7 +309,9 @@ def inject_descriptions(
     rendered as a blockquote below the prose description for searchability.
 
     Only injects if a description exists for the image ID and the image
-    doesn't already have a description block below it.
+    doesn't already have a description block below it. Chart data claiming
+    ``exact`` values is checked against ``printed_text`` (see
+    :func:`~pdfcancel.charts.ground_chart`).
     """
     for img_id, description in descriptions.items():
         if is_unavailable(description):
@@ -296,6 +321,7 @@ def inject_descriptions(
         # CHART_JSON payload. The JSON is rendered for search and preserved in
         # a hidden comment so chunks can carry structured metadata.
         description_text, chart_data = split_chart_json(description)
+        chart_data = ground_chart(chart_data, (printed_text or {}).get(img_id))
         prose, data_table = _split_description_data(description_text)
 
         # Find all markdown image references that contain this image ID
@@ -314,13 +340,12 @@ def inject_descriptions(
             + r"(\n*)"
         )
 
-        # Build the injection block
-        block = f"> **Figure description:** {prose}"
+        # Build the injection block. Every line is quoted: a multi-line
+        # description (paragraphs, bullet lists) would otherwise end the
+        # blockquote and leak into the body text and its chunks.
+        block = _quote(f"**Figure description:** {prose}")
         if data_table:
-            # Render data table as blockquoted markdown
-            block += "\n>\n" + "\n".join(
-                f"> {line}" for line in data_table.strip().splitlines()
-            )
+            block += "\n>\n" + _quote(data_table.strip())
         chart_block = render_chart_data_markdown(chart_data)
         if chart_block:
             block += "\n" + chart_block
@@ -330,11 +355,16 @@ def inject_descriptions(
 
         def _insert_desc(match: re.Match, _block: str = block) -> str:
             img_ref = match.group(1)
-            return f"{img_ref}\n{_block}\n"
+            return f"{img_ref}\n{_block}\n\n"  # a blank line ends the quote
 
         markdown_content = pattern.sub(_insert_desc, markdown_content)
 
     return markdown_content
+
+
+def _quote(text: str) -> str:
+    """Blockquote every line of ``text`` (blank lines become ``>``)."""
+    return "\n".join(f"> {line}" if line.strip() else ">" for line in text.splitlines())
 
 
 def _split_description_data(description: str) -> tuple[str, str]:

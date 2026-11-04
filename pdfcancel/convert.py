@@ -144,6 +144,7 @@ def convert_single(
     use_sdk = full or preserve_pages or extract_images or embed_images
     ocr_page_count: int | None = None
     ocr_cleanup = None  # vlm: deferred page-cache removal, run once output is saved
+    printed_text: dict[str, str] = {}  # vlm figures: text layer inside each crop
 
     if settings.ocr_engine == "vlm":
         # Generic OpenAI-compatible engine: rasterize each page and transcribe
@@ -172,6 +173,7 @@ def convert_single(
             from pdfcancel.pages import strip_page_markers
             markdown_content, raw_images = extract_figures(
                 pdf_path, markdown_content, dpi=settings.figure_dpi,
+                printed_text=printed_text,
             )
             console.print(f"    Cropped {len(raw_images)} figure(s) locally")
             if not preserve_pages:
@@ -245,6 +247,7 @@ def convert_single(
                 cached_descriptions=cached,
                 markdown_content=markdown_content,
                 stop=stop,
+                printed_text=printed_text,
             )
         except DescriptionsInterrupted as e:
             # Keep finished descriptions so a re-run describes only the rest
@@ -256,7 +259,7 @@ def convert_single(
             manifest[stem] = entry
             save_manifest(output_dir, manifest)
             raise
-        markdown_content = inject_descriptions(markdown_content, descriptions)
+        markdown_content = inject_descriptions(markdown_content, descriptions, printed_text)
 
         # Build cache for manifest: {content_hash: description}, never failures
         desc_cache = cacheable_descriptions(raw_images, descriptions)
