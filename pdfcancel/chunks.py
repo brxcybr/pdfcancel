@@ -50,7 +50,7 @@ _FIGURE_BLOCK_RE = re.compile(
     r"("
     r"!\[[^\]]*\]\([^)]+\)"                  # image reference
     r"(?:\n>.*)*"                             # optional description/data blockquote
-    r"(?:\n(?:Figure|Fig\.?)\s*\d*[^\n]*)?"    # optional caption
+    r"(?:\n\n?(?:Figure|Fig\.?)\s*\d*[^\n]*)?"  # optional caption (after a blank line)
     r")",
     re.MULTILINE,
 )

@@ -101,19 +101,24 @@ Runs `pdfcancel <path> --full --preserve-pages --chunks --chunker hierarchical`
 on the vlm engine. Per PDF:
 
 1. **OCR:** each page is rendered and transcribed to markdown by
-   `PDFCANCEL_VLM_MODEL`. That includes tables, LaTeX, captions, and the text
-   inside figures.
+   `PDFCANCEL_VLM_MODEL`. That includes tables, math, captions, and the text
+   inside figures. On born-digital pages the model also gets the PDF's
+   embedded text, so names, identifiers, and numbers are spelled as printed.
+   A page that loops is retried; leftover loops are cut and marked
+   `<!-- pdfcancel: repeated text removed -->`.
 2. **Figures:** detected locally with PyMuPDF. That covers embedded images, vector
    drawing clusters (most charts), and nearby axis and legend labels. Each
-   figure is cropped to `<stem>_images/pNNN-fKK.png` and placed where the OCR
-   left its figure placeholder. Running headers, repeated logos, ruled tables,
+   figure is cropped to `<stem>_images/pNNN-fKK.png` and placed at its OCR
+   placeholder or printed caption, else at the end of its page. Running headers, repeated logos, ruled tables,
    and shaded code or text boxes are skipped, because the OCR already
    transcribed them. A scanned page with a figure placeholder gets a
    full-page render instead.
 3. **Describe:** each crop goes to `PDFCANCEL_VLM_FULL_MODEL` (default: the OCR
-   model) along with the surrounding text. The result is a
-   `> **Figure description:**` block, plus a data table and hidden chart JSON
-   for charts and visual tables.
+   model) along with the surrounding text and any text printed inside the
+   figure. The result is a `> **Figure description:**` block, plus a data
+   table and hidden chart JSON for charts and visual tables. Chart data says
+   `confidence=exact` only when every value is printed in the figure; treat
+   `estimated` values as read off the graphic.
 4. **Chunk:** hierarchical chunks, with figure blocks kept whole and tied to
    their section.
 

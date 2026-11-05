@@ -244,11 +244,15 @@ def extract_figures(
     *,
     dpi: int = 200,
     include_tables: bool = False,
+    printed_text: dict[str, str] | None = None,
 ) -> tuple[str, dict[str, bytes]]:
     """Crop figures from ``pdf_path`` and link them into page-marked markdown.
 
     ``markdown`` must carry ``<!-- pdfcancel-page: N -->`` markers. Returns the
     markdown with ``![id](id)`` references and an ``{id: png_bytes}`` mapping.
+    When ``printed_text`` is a dict, it is filled with ``{id: text}``: the PDF
+    text layer inside each crop (labels and values exactly as printed), for
+    crops that have any.
     """
     pymupdf = _pymupdf()
     if not PAGE_MARKER_RE.search(markdown):
@@ -267,7 +271,7 @@ def extract_figures(
             rects, scanned = detect_figures(page, include_tables=include_tables)
             crops[n] = [
                 _Crop(f"p{n:03d}-f{k:02d}.png", page.get_pixmap(dpi=dpi, clip=r).tobytes("png"),
-                      *_crop_info(page, r))
+                      *_crop_info(page, r), _printed(page, r))
                 for k, r in enumerate(rects, 1)
             ]
             if not rects and scanned and placeholders.get(n):
@@ -275,7 +279,7 @@ def extract_figures(
                 # born-digital page, a figure every filter rejected stays a
                 # placeholder rather than costing a whole-page render.
                 crops[n] = [_Crop(f"p{n:03d}-page.png",
-                                  page.get_pixmap(dpi=dpi).tobytes("png"), True, None)]
+                                  page.get_pixmap(dpi=dpi).tobytes("png"), True, None, "")]
             for h in {hashlib.sha256(c.png).hexdigest() for c in crops[n]}:
                 seen[h] += 1
     finally:
@@ -288,6 +292,8 @@ def extract_figures(
         figs = [c for c in crops.get(n, []) if n
                 and hashlib.sha256(c.png).hexdigest() not in repeated]
         images.update((c.name, c.png) for c in figs)
+        if printed_text is not None:
+            printed_text.update((c.name, c.text) for c in figs if c.text)
         out.append(_place(text, figs))
     return "".join(out), images
 
@@ -297,10 +303,25 @@ class _Crop(NamedTuple):
     png: bytes
     pictorial: bool        # mostly raster with no text layer: an OCR placeholder's kind
     number: str | None     # figure number from the caption printed beside it
+    text: str              # text layer inside the crop
 
     @property
     def ref(self) -> str:
         return f"![{self.name}]({self.name})"
+
+
+def _printed(page, r) -> str:
+    """The text layer inside ``r``, one line per text line."""
+    lines = [" ".join(w[4] for w in ws) for ws in _lines(page.get_text("words", clip=r))]
+    return "\n".join(ln for ln in lines if ln.strip())
+
+
+def _lines(words: list) -> list[list]:
+    """Group ``get_text("words")`` tuples by (block, line), in order."""
+    out: dict[tuple[int, int], list] = {}
+    for w in words:
+        out.setdefault((w[5], w[6]), []).append(w)
+    return list(out.values())
 
 
 def _crop_info(page, r) -> tuple[bool, str | None]:

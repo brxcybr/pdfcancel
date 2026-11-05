@@ -29,6 +29,7 @@ from pdfcancel.images import OcrResult
 from pdfcancel.pagecache import PageCache
 from pdfcancel.pages import join_pages
 from pdfcancel.retry import with_retry
+from pdfcancel.vlmtext import clean_latex, clean_prefix, collapse_loops, find_loop
 
 console = Console()
 
@@ -48,7 +49,10 @@ VLM_OCR_PROMPT = (
     "translate, or comment. Transcribe the whole page through its final line.\n"
     "- Render tables as GitHub-flavored Markdown tables, preserving every row "
     "and cell.\n"
-    "- Render math, symbols, and equations as LaTeX ($...$ or $$...$$).\n"
+    "- Use LaTeX ($...$ or $$...$$) only for mathematical expressions and "
+    "equations. Write ordinary words, numbers, symbols (such as ✓, ×, "
+    "→), and spacing as plain text; never use math mode, \\text{}, or "
+    "\\quad for layout or alignment.\n"
     "- Transcribe the text inside figures, charts, diagrams, and infographics "
     "(titles, axis labels, legends, data values, and annotations), and include "
     "each figure's and table's caption. Use a single `![figure](figure)` "
@@ -60,6 +64,32 @@ VLM_OCR_PROMPT = (
     "and no trailing notes."
 )
 
+# Appended for a born-digital page: its embedded text layer, so exact strings
+# (identifiers like CVE vs CWE, names, numbers) come from the PDF rather than
+# from the model's reading of pixels. Layout still comes from the image.
+VLM_TEXT_LAYER_PROMPT = (
+    "\n\nThe page's embedded PDF text layer follows. Treat it as the "
+    "authoritative spelling of every word, name, identifier, acronym, and "
+    "number on the page. Take reading order, headings, tables, and structure "
+    "from the image: the text layer may be out of order, break words at line "
+    "ends, or lack text drawn inside images, which you transcribe from the "
+    "image. Do not copy text that is not visible on the page.\n\n"
+    'TEXT LAYER:\n"""\n{text}\n"""'
+)
+TEXT_LAYER_MIN_CHARS = 200     # less than this is a scan, a figure page, or a cover
+TEXT_LAYER_MAX_CHARS = 12000   # keep the hint within a modest prompt budget
+
+# A page transcription that loops (pdfcancel.vlmtext) is retried once, then
+# continued from its last clean text up to this many times. Sampling
+# penalties were tried and rejected: they turn loops into letter soup.
+VLM_LOOP_CONTINUATIONS = 2
+VLM_CONTINUE_PROMPT = (
+    "Your transcription stopped partway and began repeating itself. Continue "
+    "transcribing the page from exactly where the text above ends, through "
+    "the page's final line. Output only the continuation; do not repeat "
+    "anything already transcribed."
+)
+
 # Per-page output cap. Dense academic pages (figures with embedded text, long
 # reference lists) can exceed the old 1200-token cap and get truncated
 # mid-page; give the model room to transcribe the whole page.
@@ -67,7 +97,9 @@ VLM_OCR_MAX_TOKENS = 4096
 
 # A short fingerprint of the prompt. It is recorded in each page cache so that
 # changing the prompt automatically invalidates stale cached pages.
-VLM_PROMPT_SHA = hashlib.sha256(VLM_OCR_PROMPT.encode("utf-8")).hexdigest()[:12]
+VLM_PROMPT_SHA = hashlib.sha256(
+    (VLM_OCR_PROMPT + VLM_TEXT_LAYER_PROMPT).encode("utf-8")
+).hexdigest()[:12]
 
 
 def _file_sha256(path: Path) -> str:
@@ -171,12 +203,14 @@ def chat_vision(
     max_tokens: int = 1200,
     mime: str = "image/png",
     http_client=None,
+    history: list[dict] | None = None,
 ) -> str:
     """Send one image + prompt to an OpenAI-compatible chat model, return text.
 
     When ``http_client`` is provided the caller owns its lifecycle (useful for
     reusing one connection pool across many pages); otherwise a client is built
-    and closed per call.
+    and closed per call. ``history`` appends later turns (e.g. a partial
+    answer and a request to continue it) after the image message.
     """
     base = _require_api_base(settings)
     model = model or resolve_vlm_model(settings, http_client=http_client)
@@ -192,7 +226,8 @@ def chat_vision(
                     {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": data_uri}},
                 ],
-            }
+            },
+            *(history or []),
         ],
         "temperature": 0.1,
         "max_tokens": max_tokens,
@@ -244,6 +279,71 @@ def rasterize_pdf(pdf_path: Path, dpi: int = 200) -> list[bytes]:
     return pages
 
 
+def _usable_text_layer(text: str) -> str | None:
+    """The page's text layer when it is real prose, else ``None``.
+
+    Scans have none; broken font encodings yield replacement characters or
+    symbol soup, which would mislead rather than help.
+    """
+    text = text.strip()
+    if len(text) < TEXT_LAYER_MIN_CHARS or text.count("\ufffd") > 0.01 * len(text):
+        return None
+    tokens = text.split()
+    wordy = sum(1 for t in tokens if sum(c.isalpha() for c in t) >= 2)
+    if wordy < 0.5 * len(tokens):
+        return None
+    return text[:TEXT_LAYER_MAX_CHARS]
+
+
+def page_text_layers(pdf_path: Path) -> list[str | None]:
+    """Each page's usable embedded text (see :func:`_usable_text_layer`)."""
+    import pymupdf
+
+    flags = pymupdf.TEXTFLAGS_TEXT | pymupdf.TEXT_DEHYPHENATE
+    with pymupdf.open(str(pdf_path)) as doc:
+        return [_usable_text_layer(page.get_text("text", flags=flags)) for page in doc]
+
+
+def ocr_prompt(text_layer: str | None) -> str:
+    """The transcription prompt, with the page's text layer when it has one."""
+    if not text_layer:
+        return VLM_OCR_PROMPT
+    return VLM_OCR_PROMPT + VLM_TEXT_LAYER_PROMPT.format(text=text_layer)
+
+
+def repair_page(markdown: str) -> str:
+    """Collapse repetition loops and unwrap layout-only LaTeX in one page."""
+    return clean_latex(collapse_loops(markdown))
+
+
+def _transcribe_page(ask, page_no: int) -> str:
+    """Transcribe one page with ``ask``, recovering from repetition loops.
+
+    Loops are sampling accidents, so a looping page is retried once. If that
+    loops too, the transcription is continued from its last clean text: a
+    loop runs to the token cap, so everything after it is otherwise lost.
+    Whatever loops in the end is cut by :func:`repair_page`.
+    """
+    md = ask()
+    if not find_loop(md):
+        return md
+    console.print(f"    [yellow]page {page_no}: repetition loop, retrying[/yellow]")
+    retry = ask()
+    if not find_loop(retry):
+        return retry
+    text = max((md, retry), key=lambda t: len(clean_prefix(t)))
+    for _ in range(VLM_LOOP_CONTINUATIONS):
+        done = clean_prefix(text)
+        console.print(f"    [yellow]page {page_no}: continuing after a loop[/yellow]")
+        more = ask([{"role": "assistant", "content": done},
+                    {"role": "user", "content": VLM_CONTINUE_PROMPT}])
+        added = clean_prefix(more)
+        text = done + "\n" + more.lstrip()
+        if not find_loop(more) or len(added.split()) < 20:
+            break
+    return text
+
+
 def vlm_ocr_pdf(
     pdf_path: Path,
     settings: Settings,
@@ -277,6 +377,15 @@ def vlm_ocr_pdf(
     """
     page_images = rasterize_pdf(pdf_path, dpi=settings.ocr_dpi)
     n = len(page_images)
+    text_layers: list[str | None] = [None] * n
+    if settings.vlm_text_layer:
+        try:
+            layers = page_text_layers(pdf_path)
+        except Exception as exc:  # the hint is optional; OCR from pixels alone
+            console.print(f"    [yellow]No text layer hints ({type(exc).__name__}: {exc})[/yellow]")
+        else:
+            if len(layers) == n:
+                text_layers = layers
     if n == 0:
         return OcrResult(markdown="", images={}, page_markdowns=[])
 
@@ -293,6 +402,7 @@ def vlm_ocr_pdf(
             "dpi": int(settings.ocr_dpi),
             "model": model,
             "prompt_sha": VLM_PROMPT_SHA,
+            "text_layer": bool(settings.vlm_text_layer),
             "page_count": n,
         }
         cache = PageCache(cache_dir, stem=pdf_path.stem, meta=meta)
@@ -331,16 +441,19 @@ def vlm_ocr_pdf(
             client = settings.build_vision_http_client()
 
             def _transcribe(index: int) -> tuple[int, str]:
-                md = chat_vision(
-                    settings,
-                    image_bytes=page_images[index],
-                    prompt=VLM_OCR_PROMPT,
-                    model=model,
-                    max_tokens=VLM_OCR_MAX_TOKENS,
-                    mime="image/png",
-                    http_client=client,
-                )
-                return index, md
+                def ask(history: list[dict] | None = None) -> str:
+                    return chat_vision(
+                        settings,
+                        image_bytes=page_images[index],
+                        prompt=ocr_prompt(text_layers[index]),
+                        model=model,
+                        max_tokens=VLM_OCR_MAX_TOKENS,
+                        mime="image/png",
+                        http_client=client,
+                        **({"history": history} if history else {}),
+                    )
+
+                return index, _transcribe_page(ask, index + 1)
 
             try:
                 pending = iter(todo)
@@ -397,6 +510,8 @@ def vlm_ocr_pdf(
             interrupted=interrupted,
         )
 
+    # Repair at assembly, so pages cached by an earlier run are repaired too.
+    page_markdowns = [repair_page(md) for md in page_markdowns]
     markdown = join_pages(page_markdowns, preserve_pages=preserve_pages)
     result = OcrResult(markdown=markdown, images={}, page_markdowns=page_markdowns)
     if cache is not None:

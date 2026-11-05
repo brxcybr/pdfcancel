@@ -36,7 +36,10 @@ def chart_prompt_instructions() -> str:
         '  "confidence": "exact|estimated|low",\n'
         '  "notes": "brief caveats about approximate values"\n'
         "}\n"
-        "Use null for unknown numeric values. Use strings for categorical "
+        'Set "confidence" to "exact" only when every value you report is '
+        "printed as a number in the figure (data labels, table cells); values "
+        "read from bar heights, slice sizes, or point positions are "
+        '"estimated". Use null for unknown numeric values. Use strings for categorical '
         "labels. Omit CHART_JSON entirely if there is no extractable "
         "structured data. Do not wrap the JSON in markdown fences."
     )
@@ -86,6 +89,57 @@ def normalize_chart_data(raw: Any) -> dict[str, Any]:
     if not chart["series"] and not chart["table"]["rows"]:
         return {}
     return chart
+
+
+_NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
+
+
+def ground_chart(chart: dict[str, Any] | None, printed: str | None) -> dict[str, Any] | None:
+    """Hold an ``exact`` claim to the numbers actually printed in the figure.
+
+    Models mark values read off bar heights or pie slices as exact. A chart
+    stays ``exact`` only if each of its numeric values appears in the figure's
+    text layer (``printed``; as-is or as a percentage). Otherwise it becomes
+    ``estimated``, with the reason in ``notes``.
+    """
+    if not chart or chart.get("confidence") != "exact":
+        return chart
+    values = _chart_values(chart)
+    if not values:
+        return chart
+    if any(isinstance(v, str) for v in values):
+        reason = "some values are marked approximate"
+    elif not printed:
+        reason = "values were read from the image and could not be checked against printed text"
+    else:
+        found = [float(n.replace(",", "")) for n in _NUMBER_RE.findall(printed)]
+        missing = [v for v in values
+                   if not any(_close(v, n) or _close(v * 100, n) for n in found)]
+        reason = (f"{len(missing)} of {len(values)} values are not printed in the figure"
+                  if missing else "")
+    if not reason:
+        return chart
+    notes = "; ".join(x for x in (chart.get("notes"), f"confidence lowered from exact: {reason}") if x)
+    return {**chart, "confidence": "estimated", "notes": notes}
+
+
+def _chart_values(chart: dict[str, Any]) -> list[float | str]:
+    """Numeric values claimed by a chart: floats, or ``"~n"`` strings if approximate."""
+    out: list[float | str] = []
+    cells = [p.get("y") for s in chart.get("series") or [] for p in s.get("points") or []]
+    cells += [v for row in (chart.get("table") or {}).get("rows") or [] for v in row.values()]
+    for v in cells:
+        if isinstance(v, bool) or v is None:
+            continue
+        if isinstance(v, (int, float)):
+            out.append(float(v))
+        elif isinstance(v, str) and re.fullmatch(r"~\s*[-+]?\d[\d,]*(?:\.\d+)?%?", v.strip()):
+            out.append(v)
+    return out
+
+
+def _close(a: float, b: float) -> bool:
+    return abs(a - b) <= 1e-6 * max(1.0, abs(a), abs(b))
 
 
 def render_chart_data_markdown(chart: dict[str, Any] | None) -> str:
