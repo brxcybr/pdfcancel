@@ -161,7 +161,7 @@ except ImportError:
 @click.option("--ocr-dpi", type=int, default=None,
               help="vlm engine: page rasterization DPI (default: 200).")
 @click.option("--ocr-concurrency", type=int, default=None,
-              help="vlm engine: concurrent page requests (default: 4).")
+              help="vlm engine: concurrent page requests (default: 8).")
 @click.option("--ocr-retries", type=int, default=None,
               help="vlm engine: network retry attempts per request (default: 5).")
 @click.option("--ocr-timeout", type=float, default=None,

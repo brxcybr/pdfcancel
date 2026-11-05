@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -90,6 +91,13 @@ VLM_CONTINUE_PROMPT = (
     "anything already transcribed."
 )
 
+# A page that loops on its retry is transcribed in regions (columns, or
+# halves) when it can be split; each part is a shorter, steadier request.
+VLM_REGION_PROMPT = (
+    "\n\nThis image is part {i} of {n} of the page, cut along blank space in "
+    "reading order. Transcribe only what is in this part."
+)
+
 # Per-page output cap. Dense academic pages (figures with embedded text, long
 # reference lists) can exceed the old 1200-token cap and get truncated
 # mid-page; give the model room to transcribe the whole page.
@@ -114,6 +122,39 @@ def _file_sha256(path: Path) -> str:
 def _auth_headers(settings: Settings) -> dict[str, str]:
     """Bearer-auth headers (vLLM accepts any token; default is ``EMPTY``)."""
     return {"Authorization": f"Bearer {settings.api_key or 'EMPTY'}"}
+
+
+STREAM_CHECK_CHARS = 1500  # re-test stop_when after this much new text
+
+
+def _stream(client, url: str, payload: dict, headers: dict, stop_when) -> str:
+    """POST a streaming chat request; stop reading once ``stop_when(text)``."""
+    with client.stream("POST", url, json=payload, headers=headers) as resp:
+        resp.raise_for_status()
+        if "text/event-stream" not in resp.headers.get("content-type", ""):
+            resp.read()  # the server ignored "stream": an ordinary reply
+            return _extract_content(resp.json())
+        parts: list[str] = []
+        size = checked = 0
+        for line in resp.iter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                choice = (json.loads(data).get("choices") or [{}])[0]
+            except (json.JSONDecodeError, AttributeError):
+                continue
+            piece = (choice.get("delta") or {}).get("content") or ""
+            if piece:
+                parts.append(piece)
+                size += len(piece)
+            if size - checked >= STREAM_CHECK_CHARS:
+                checked = size
+                if stop_when("".join(parts)):
+                    break
+        return "".join(parts)
 
 
 def _require_api_base(settings: Settings) -> str:
@@ -204,6 +245,7 @@ def chat_vision(
     mime: str = "image/png",
     http_client=None,
     history: list[dict] | None = None,
+    stop_when=None,
 ) -> str:
     """Send one image + prompt to an OpenAI-compatible chat model, return text.
 
@@ -211,6 +253,10 @@ def chat_vision(
     reusing one connection pool across many pages); otherwise a client is built
     and closed per call. ``history`` appends later turns (e.g. a partial
     answer and a request to continue it) after the image message.
+
+    With ``stop_when(text) -> bool``, the reply is streamed and cut off as soon
+    as ``stop_when`` is true of the text so far (a repetition loop would
+    otherwise run on to ``max_tokens``); the partial text is returned.
     """
     base = _require_api_base(settings)
     model = model or resolve_vlm_model(settings, http_client=http_client)
@@ -237,6 +283,15 @@ def chat_vision(
     own_client = http_client is None
     client = http_client or settings.build_vision_http_client()
     try:
+        if stop_when is not None:
+            return with_retry(
+                lambda: _stream(client, url, {**payload, "stream": True},
+                                _auth_headers(settings), stop_when),
+                description=f"vlm chat ({model})",
+                attempts=settings.ocr_retries,
+                base_delay=settings.ocr_backoff,
+            )
+
         def _do():
             resp = client.post(url, json=payload, headers=_auth_headers(settings))
             resp.raise_for_status()
@@ -316,13 +371,40 @@ def repair_page(markdown: str) -> str:
     return clean_latex(collapse_loops(markdown))
 
 
-def _transcribe_page(ask, page_no: int) -> str:
+def page_region_asks(pdf_path: Path, index: int, settings: Settings, ask_image) -> list:
+    """One ``ask`` per reading-order region of a page, or ``[]`` if it won't split.
+
+    ``ask_image(png, prompt, history=None)`` sends one image. Each region gets
+    the text layer inside it as its hint, like a whole page does.
+    """
+    import pymupdf
+
+    from pdfcancel.regions import page_regions
+
+    flags = pymupdf.TEXTFLAGS_TEXT | pymupdf.TEXT_DEHYPHENATE
+    asks = []
+    with pymupdf.open(str(pdf_path)) as doc:
+        page = doc[index]
+        regions = page_regions(page)
+        for i, r in enumerate(regions, 1):
+            clip = pymupdf.Rect(r)
+            png = page.get_pixmap(dpi=settings.ocr_dpi, clip=clip).tobytes("png")
+            hint = (_usable_text_layer(page.get_text("text", clip=clip, flags=flags))
+                    if settings.vlm_text_layer else None)
+            prompt = ocr_prompt(hint) + VLM_REGION_PROMPT.format(i=i, n=len(regions))
+            asks.append(lambda history=None, _png=png, _p=prompt: ask_image(_png, _p, history))
+    return asks if len(asks) > 1 else []
+
+
+def _transcribe_page(ask, page_no: int, regions=None) -> str:
     """Transcribe one page with ``ask``, recovering from repetition loops.
 
     Loops are sampling accidents, so a looping page is retried once. If that
-    loops too, the transcription is continued from its last clean text: a
-    loop runs to the token cap, so everything after it is otherwise lost.
-    Whatever loops in the end is cut by :func:`repair_page`.
+    loops too and ``regions()`` splits the page (:func:`page_region_asks`),
+    each region is transcribed on its own (with the same recovery) and the
+    parts are joined. Otherwise the transcription is continued from its last
+    clean text: a loop runs to the token cap, so everything after it is
+    otherwise lost. Whatever loops in the end is cut by :func:`repair_page`.
     """
     md = ask()
     if not find_loop(md):
@@ -331,6 +413,14 @@ def _transcribe_page(ask, page_no: int) -> str:
     retry = ask()
     if not find_loop(retry):
         return retry
+    try:
+        parts = regions() if regions else []
+    except Exception as exc:  # splitting is a best effort; fall back to continuing
+        console.print(f"    [yellow]page {page_no}: can't split ({type(exc).__name__})[/yellow]")
+        parts = []
+    if parts:
+        console.print(f"    [yellow]page {page_no}: transcribing {len(parts)} regions[/yellow]")
+        return "\n\n".join(_transcribe_page(part, page_no).strip() for part in parts)
     text = max((md, retry), key=lambda t: len(clean_prefix(t)))
     for _ in range(VLM_LOOP_CONTINUATIONS):
         done = clean_prefix(text)
@@ -440,20 +530,27 @@ def vlm_ocr_pdf(
         else:
             client = settings.build_vision_http_client()
 
+            def ask_image(png: bytes, prompt: str, history: list[dict] | None = None) -> str:
+                return chat_vision(
+                    settings,
+                    image_bytes=png,
+                    prompt=prompt,
+                    model=model,
+                    max_tokens=VLM_OCR_MAX_TOKENS,
+                    mime="image/png",
+                    http_client=client,
+                    stop_when=find_loop,
+                    **({"history": history} if history else {}),
+                )
+
             def _transcribe(index: int) -> tuple[int, str]:
                 def ask(history: list[dict] | None = None) -> str:
-                    return chat_vision(
-                        settings,
-                        image_bytes=page_images[index],
-                        prompt=ocr_prompt(text_layers[index]),
-                        model=model,
-                        max_tokens=VLM_OCR_MAX_TOKENS,
-                        mime="image/png",
-                        http_client=client,
-                        **({"history": history} if history else {}),
-                    )
+                    return ask_image(page_images[index], ocr_prompt(text_layers[index]), history)
 
-                return index, _transcribe_page(ask, index + 1)
+                def regions() -> list:
+                    return page_region_asks(pdf_path, index, settings, ask_image)
+
+                return index, _transcribe_page(ask, index + 1, regions)
 
             try:
                 pending = iter(todo)

@@ -50,6 +50,14 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    """Parse an on/off env var; anything but 0/false/no/off is on."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() not in ("0", "false", "no", "off")
+
+
 @dataclass
 class Settings:
     """Runtime settings resolved from env vars, CLI flags, and defaults."""
@@ -89,15 +97,24 @@ class Settings:
         default_factory=lambda: os.getenv("PDFCANCEL_VLM_FULL_MODEL", "").strip()
     )
     figure_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_FIGURE_DPI", 200))
+    # vlm engine --full: a data-only pass reads chart values from a sharper
+    # render (chart_dpi) with chart_model (defaults to vlm_model, the OCR
+    # model, which reads values more accurately than a description model).
+    vlm_chart_pass: bool = field(
+        default_factory=lambda: _bool_env("PDFCANCEL_VLM_CHART_PASS", True)
+    )
+    vlm_chart_model: str = field(
+        default_factory=lambda: os.getenv("PDFCANCEL_VLM_CHART_MODEL", "").strip()
+    )
+    chart_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_CHART_DPI", 300))
     # vlm engine: give the model each born-digital page's embedded text as the
     # authoritative spelling (identifiers, names, numbers).
     vlm_text_layer: bool = field(
-        default_factory=lambda: os.getenv("PDFCANCEL_VLM_TEXT_LAYER", "1").strip().lower()
-        not in ("0", "false", "no", "off")
+        default_factory=lambda: _bool_env("PDFCANCEL_VLM_TEXT_LAYER", True)
     )
     ocr_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_OCR_DPI", 200))
     ocr_concurrency: int = field(
-        default_factory=lambda: _int_env("PDFCANCEL_OCR_CONCURRENCY", 4)
+        default_factory=lambda: _int_env("PDFCANCEL_OCR_CONCURRENCY", 8)
     )
     # Network resilience for the vlm engine (long/flaky runs). Retries apply
     # per request (page transcription, model listing); timeout is the per-page

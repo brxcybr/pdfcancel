@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -73,7 +74,7 @@ SOUP = "[27] A. Serrano, " + "lI " * 20 + "I " * 25 + "ee CC C ii d TT " * 4 + "
 
 
 def _fake_chat(replies, calls):
-    def fake(s, *, image_bytes, prompt, model, max_tokens, mime, http_client, history=None):
+    def fake(s, *, image_bytes, prompt, model, max_tokens, mime, http_client, history=None, stop_when=None):
         calls.append({"prompt": prompt, "history": history})
         return replies[min(len(calls), len(replies)) - 1]
     return fake
@@ -241,3 +242,46 @@ def test_chunker_keeps_caption_with_its_described_figure():
     out = inject_descriptions(md, {"p001-f01.png": "A chart."})
     (block,) = _protect_figure_blocks(out)[1].values()
     assert block.endswith("Figure 1: Sales.") and "Next." not in block
+
+
+# ── looping pages split into regions ─────────────────────────────────────────
+
+def _two_column_pdf(tmp_path: Path) -> Path:
+    doc = pymupdf.open()
+    page = doc.new_page(width=612, height=792)
+    page.insert_textbox(pymupdf.Rect(150, 40, 460, 70), "REFERENCES", fontsize=14)
+    for x0 in (50, 320):
+        page.insert_textbox(pymupdf.Rect(x0, 90, x0 + 240, 740),
+                            "[1] A. Author, Some reference title. " * 40, fontsize=9)
+    path = tmp_path / "refs.pdf"
+    doc.save(str(path))
+    return path
+
+
+def test_a_page_that_keeps_looping_is_transcribed_by_column(tmp_path, monkeypatch):
+    settings = _ocr_settings()
+    calls = []
+
+    def fake(s, *, image_bytes, prompt, model, max_tokens, mime, http_client, history=None, stop_when=None):
+        calls.append(prompt)
+        part = re.search(r"part (\d) of 3", prompt)
+        return ["REFERENCES", "Left column refs.", "Right column refs."][int(part[1]) - 1] \
+            if part else LOOP
+    monkeypatch.setattr(llm, "chat_vision", fake)
+    monkeypatch.setattr(settings, "build_vision_http_client", lambda: _Closeable())
+    result = llm.vlm_ocr_pdf(_two_column_pdf(tmp_path), settings)
+    assert result.markdown == "REFERENCES\n\nLeft column refs.\n\nRight column refs."
+    assert len(calls) == 5  # page, retry, then the heading and each column
+
+
+def test_regions_follow_columns_and_keep_figures_whole(tmp_path):
+    from pdfcancel.regions import page_regions
+
+    doc = pymupdf.open(str(_two_column_pdf(tmp_path)))
+    heading, left, right = page_regions(doc[0])
+    assert heading[0] == 0 and heading[2] == 612 and heading[3] < left[1]  # full width, first
+    assert left[2] == right[0] and 290 < left[2] < 320  # cut in the gutter
+
+    page = pymupdf.open().new_page(width=612, height=792)
+    page.draw_circle((306, 400), 120, fill=(0.3, 0.3, 0.3))  # a centered pie
+    assert page_regions(page) == []  # one block: nothing to split

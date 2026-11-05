@@ -10,7 +10,7 @@ OCR runs on **Mistral** by default, or on **any OpenAI-compatible vision model**
 
 Tools like `pdftotext` flatten PDFs into unstructured strings, losing all document hierarchy. `pdfcancel` produces **clean markdown** with:
 
-- Heading hierarchy preserved (`#`, `##`, `###`, etc.)
+- Heading hierarchy preserved (`#`, `##`, `###`, etc.), with levels set from the section numbering (`2.1` → `###`, IEEE `II.`/`B.`) and numbered section headings recovered when a page left them as plain text
 - Tables reconstructed as markdown tables
 - Lists, blockquotes, and code blocks maintained
 - Mathematical equations in LaTeX format
@@ -80,12 +80,15 @@ MISTRAL_API_KEY=your-key-here
 | `PDFCANCEL_API_KEY` | `EMPTY` | Bearer token for the `vlm` endpoint (vLLM accepts any value) |
 | `PDFCANCEL_VLM_MODEL` | *(unset)* | Model id for the `vlm` engine (required for a multi-model proxy) |
 | `PDFCANCEL_OCR_DPI` | `200` | `vlm` engine: page rasterization DPI |
-| `PDFCANCEL_OCR_CONCURRENCY` | `4` | `vlm` engine: concurrent page requests |
+| `PDFCANCEL_OCR_CONCURRENCY` | `8` | `vlm` engine: concurrent page and figure requests |
 | `PDFCANCEL_OCR_RETRIES` | `5` | `vlm` engine: network retry attempts per request |
 | `PDFCANCEL_OCR_BACKOFF` | `2.0` | `vlm` engine: base seconds for exponential retry backoff |
 | `PDFCANCEL_OCR_TIMEOUT` | `180` | `vlm` engine: per-request read/write timeout in seconds (connect is fixed at 15s) |
 | `PDFCANCEL_VLM_FULL_MODEL` | *(vlm model)* | `vlm` engine: vision model for `--full` figure descriptions (`--full-model`) |
 | `PDFCANCEL_FIGURE_DPI` | `200` | `vlm` engine: DPI that locally cropped figures are rendered at |
+| `PDFCANCEL_VLM_CHART_PASS` | `1` | `vlm` engine `--full`: read each chart's values in a separate data-only request (`0` to disable) |
+| `PDFCANCEL_VLM_CHART_MODEL` | *(vlm model)* | `vlm` engine `--full`: model for the chart data pass |
+| `PDFCANCEL_CHART_DPI` | `300` | `vlm` engine `--full`: DPI of the render the chart data pass reads |
 | `PDFCANCEL_VLM_TEXT_LAYER` | `1` | `vlm` engine: give the model each born-digital page's embedded text as the authoritative spelling (`0` to disable) |
 
 ### Choosing an OCR engine (`--ocr-engine`)
@@ -109,10 +112,10 @@ pdfcancel ./refs/ \
 - **LiteLLM model names:** a LiteLLM proxy routes by its own **alias** (e.g. `gemma-4-31B-it`), not the backend's Hugging Face id (`google/gemma-4-31B-it`). Sending the HF id returns `400 Invalid model name`. List aliases with `GET /v1/models`, and alias → backend with `GET /model/info`. A direct vLLM URL wants the HF id instead.
 - **Auth:** most vLLM servers accept any token; the default is `EMPTY`. Override with `--api-key` / `PDFCANCEL_API_KEY` if your gateway requires one.
 - **Text layer:** on a born-digital page, the prompt also carries the page's embedded PDF text, so exact strings (identifiers like CVE vs. CWE, names, numbers) come from the PDF while the image supplies layout, tables, and text inside figures. Scans, figure-only pages, and broken font encodings get no hint. Disable with `PDFCANCEL_VLM_TEXT_LAYER=0`.
-- **Transcription repair:** a page whose transcription falls into a repetition loop (or letter soup) is retried once, then continued from its last clean text; whatever still loops is cut (marked `<!-- pdfcancel: repeated text removed -->`). LaTeX used for layout (`$\text{word}$`, `\quad`) is unwrapped to plain text, and lone symbols (`$\checkmark$`) become Unicode; real math is kept.
-- **Tuning:** `--ocr-dpi` (default 200) trades rasterization sharpness for tokens/latency; `--ocr-concurrency` (default 4) sets how many pages are transcribed in parallel.
+- **Transcription repair:** page replies are streamed and stopped as soon as they fall into a repetition loop (or letter soup), so a loop costs seconds rather than a full token budget. A looping page is retried once; if it loops again, it is transcribed in regions (its columns, or halves, cut along blank space) and the parts are joined, falling back to continuing from the last clean text when the page can't be split. Whatever still loops is cut (marked `<!-- pdfcancel: repeated text removed -->`). LaTeX used for layout (`$\text{word}$`, `\quad`) is unwrapped to plain text, and lone symbols (`$\checkmark$`) become Unicode; real math is kept.
+- **Tuning:** `--ocr-dpi` (default 200) trades rasterization sharpness for tokens/latency; `--ocr-concurrency` (default 8) sets how many pages (and figures) are processed in parallel. Throughput scales nearly linearly on a vLLM backend: a 20-page spec took 47 s at 4, 26 s at 8, and 18 s at 16; lower it for a small or shared server.
 - **TLS:** the `vlm` engine reuses the shared CA bundle (`--ca-bundle` / `MISTRAL_CA_BUNDLE`) for internal/self-signed certificates — see below.
-- **Figures (`--images` / `--embed-images` / `--full`):** a chat model returns only text, so pdfcancel crops figures **locally** with PyMuPDF (`pdfcancel/figures.py`). It detects embedded images and vector drawing clusters (most charts), grows each crop to include nearby axis and legend labels, and skips running headers, repeated logos, ruled tables, and shaded code/text boxes. Crops land in `<name>_images/pNNN-fKK.png`; each goes at the OCR placeholder or printed caption ("Figure 3") it belongs to; crops with no match are appended at the end of their page. `--full` then describes each crop on the **same** endpoint (`--full-model` / `PDFCANCEL_VLM_FULL_MODEL`, defaulting to the OCR model), so the whole pipeline stays on your network. The describer also gets the text printed inside each figure, and chart data keeps `confidence=exact` only when every value it reports is printed in the figure:
+- **Figures (`--images` / `--embed-images` / `--full`):** a chat model returns only text, so pdfcancel crops figures **locally** with PyMuPDF (`pdfcancel/figures.py`). It detects embedded images and vector drawing clusters (most charts), grows each crop to include nearby axis and legend labels, and skips running headers, repeated logos, ruled tables, and shaded code/text boxes. Crops land in `<name>_images/pNNN-fKK.png`; each goes at the OCR placeholder or printed caption ("Figure 3") it belongs to; crops with no match are appended at the end of their page. `--full` then describes each crop on the **same** endpoint (`--full-model` / `PDFCANCEL_VLM_FULL_MODEL`, defaulting to the OCR model), so the whole pipeline stays on your network. The crop also takes in tick and legend labels that the PDF draws as glyph outlines rather than text. The describer gets the text printed inside each figure. For charts, a separate **data-only pass** first reads the values from a 300-DPI render with the OCR model (listing legend swatches before matching pie slices, reading line charts at every x label), and the description is written from those values. Chart data keeps `confidence=exact` only when every value it reports is printed in the figure:
   ```bash
   pdfcancel paper.pdf --api-base https://your-host/litellm/v1 --model <ocr-alias> \
     --full --full-model <vision-alias> --preserve-pages --chunks --chunker hierarchical
@@ -404,7 +407,7 @@ Cancel options:
   --api-key TOKEN        Bearer token for the vlm endpoint (default: EMPTY)
   --ca-bundle PATH       CA bundle (PEM) to verify a self-hosted TLS cert (either engine)
   --ocr-dpi N            vlm: page rasterization DPI (default: 200)
-  --ocr-concurrency N    vlm: concurrent page requests (default: 4)
+  --ocr-concurrency N    vlm: concurrent page requests (default: 8)
   --enhance FILE.md      Enhance an existing markdown file
   --model MODEL          OCR model override
   --chunks               Produce chunked JSONL for RAG/LLM

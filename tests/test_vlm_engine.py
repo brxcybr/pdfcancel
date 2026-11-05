@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 
 import pytest
@@ -210,7 +211,7 @@ def _stub_ocr(monkeypatch, pages: list[bytes]):
     monkeypatch.setattr(
         llm,
         "chat_vision",
-        lambda s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None: (
+        lambda s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None, stop_when=None: (
             f"PAGE[{image_bytes.decode()}]"
         ),
     )
@@ -259,3 +260,40 @@ def test_rasterize_pdf_smoke(tmp_path):
     assert pages[0][:8] == b"\x89PNG\r\n\x1a\n"
 
 
+
+
+def _sse_client(chunks: list[str], seen: dict, content_type="text/event-stream"):
+    import httpx
+
+    def handler(request):
+        seen["body"] = json.loads(request.content)
+        if content_type != "text/event-stream":
+            return httpx.Response(200, json={"choices": [{"message": {"content": "plain"}}]})
+        lines = [f"data: {json.dumps({'choices': [{'delta': {'content': c}}]})}\n\n" for c in chunks]
+        return httpx.Response(200, content="".join(lines) + "data: [DONE]\n\n",
+                              headers={"content-type": content_type})
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_streamed_reply_is_cut_once_stop_when_fires(monkeypatch):
+    monkeypatch.setattr(llm, "STREAM_CHECK_CHARS", 10)
+    settings = Settings(api_base="https://h/v1", ocr_engine="vlm")
+    seen: dict = {}
+    chunks = ["intro text ", "loop loop ", "loop loop ", "more " * 50]
+    out = llm.chat_vision(settings, image_bytes=b"z", prompt="p", model="m",
+                          http_client=_sse_client(chunks, seen),
+                          stop_when=lambda t: t.count("loop") >= 4)
+    assert seen["body"]["stream"] is True
+    assert out == "intro text loop loop loop loop "  # stopped before "more"
+
+
+def test_streamed_reply_runs_to_the_end_and_tolerates_plain_json(monkeypatch):
+    settings = Settings(api_base="https://h/v1", ocr_engine="vlm")
+    out = llm.chat_vision(settings, image_bytes=b"z", prompt="p", model="m",
+                          http_client=_sse_client(["# Page", " text"], {}),
+                          stop_when=lambda t: False)
+    assert out == "# Page text"
+    out = llm.chat_vision(settings, image_bytes=b"z", prompt="p", model="m",
+                          http_client=_sse_client([], {}, "application/json"),
+                          stop_when=lambda t: False)
+    assert out == "plain"  # a server that ignores "stream"

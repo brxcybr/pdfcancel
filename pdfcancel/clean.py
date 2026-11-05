@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from pdfcancel.headings import normalize_headings
 from pdfcancel.pages import is_page_marker_line
 
 
@@ -25,6 +26,7 @@ def clean_markdown(text: str) -> str:
     text = _strip_download_watermarks(text)
     text = _strip_repeating_headers_footers(text)
     text = _strip_bare_page_numbers(text)
+    text = normalize_headings(text)
     text = _rejoin_broken_sentences(text)
     text = _collapse_blank_lines(text)
     return text
