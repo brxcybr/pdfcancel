@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from pdfcancel.clean import clean_markdown
-from pdfcancel.headings import normalize_headings
+from pdfcancel.headings import font_heading_levels, normalize_headings
+from pdfcancel.pages import join_pages
 
 
 def _heads(md: str) -> list[str]:
@@ -56,3 +57,50 @@ def test_page_markers_count_as_blank_and_cleanup_runs_it():
           "2.1. Detail\n\nz\n\n# 3. End\n\nw")
     assert _heads(clean_markdown(md)) == [
         "## 1. Intro", "## 2. Next", "### 2.1. Detail", "## 3. End"]
+
+
+def _book_pdf(path):
+    """Unnumbered: a 20 pt title, 14 pt bold sections, 11 pt bold subsections."""
+    import pymupdf
+
+    body = "Ordinary body text set at ten points in the running prose of the book. " * 8
+    pages = [[("Field Guide to Testing", 20, "helv"), ("Getting Started", 14, "hebo")],
+             [("Planning Ahead", 14, "hebo"), ("Choosing Tools", 11, "hebo"),
+              ("Writing Cases", 11, "hebo")],
+             [("Running Suites", 14, "hebo"), ("Reading Results", 11, "hebo")]]
+    doc = pymupdf.open()
+    for heads in pages:
+        p = doc.new_page(width=612, height=792)
+        y = 80
+        for text, size, font in heads:
+            p.insert_text((72, y), text, fontsize=size, fontname=font)
+            p.insert_textbox(pymupdf.Rect(72, y + 10, 540, y + 120), body, fontsize=10)
+            y += 140
+    doc.save(str(path))
+    return path
+
+
+def test_unnumbered_levels_come_from_font_sizes(tmp_path):
+    import pytest
+
+    pytest.importorskip("pymupdf")
+    pdf = _book_pdf(tmp_path / "book.pdf")
+    md = join_pages([
+        "# Field Guide to Testing\n\n# Getting Started\n\nText.",
+        "# Planning Ahead\n\n# Choosing Tools\n\nText.\n\n```sh\n# install the tools\n```\n\n"
+        "## Writing Cases\n\n"
+        "# Chart Title Inside A Figure\n\nText.",
+        "### Running Suites\n\n# Reading Results\n\nText."], preserve_pages=True)
+    out = font_heading_levels(md, pdf)
+    assert "```sh\n# install the tools\n```" in out  # code is left alone
+    assert _heads(out.replace("# install the tools", "")) == [
+        "# Field Guide to Testing", "## Getting Started", "## Planning Ahead",
+        "### Choosing Tools", "### Writing Cases",
+        "### Chart Title Inside A Figure",  # not in the text layer: kept below the top
+        "## Running Suites", "### Reading Results"]
+
+
+def test_numbered_documents_keep_numbering_levels(tmp_path):
+    md = join_pages(["# 1. Intro\n\nText.\n\n# 2. Methods\n\nText.\n\n# 3. Results"],
+                    preserve_pages=True)
+    assert font_heading_levels(md, tmp_path / "unused.pdf") == md

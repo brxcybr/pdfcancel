@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 
+from pdfcancel.figures import PLACEHOLDER_RE
 from pdfcancel.headings import normalize_headings
 from pdfcancel.pages import is_page_marker_line
 
@@ -26,6 +27,7 @@ def clean_markdown(text: str) -> str:
     text = _strip_download_watermarks(text)
     text = _strip_repeating_headers_footers(text)
     text = _strip_bare_page_numbers(text)
+    text = _strip_figure_placeholders(text)
     text = normalize_headings(text)
     text = _rejoin_broken_sentences(text)
     text = _collapse_blank_lines(text)
@@ -264,6 +266,34 @@ def _strip_bare_page_numbers(text: str) -> str:
                 continue  # Skip this line (it's a page number)
         cleaned.append(line)
     return "\n".join(cleaned)
+
+
+# ---------------------------------------------------------------------------
+# Pass 3b: Unplaced figure placeholders
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_SPAN_RE = re.compile(r"[ \t]*" + PLACEHOLDER_RE.pattern + r"[ \t]*")
+# A line of only placeholders, with the blank line after it (its paragraph break).
+_PLACEHOLDER_LINE_RE = re.compile(
+    r"^[ \t]*(?:" + PLACEHOLDER_RE.pattern + r"[ \t]*)+(?:\n[ \t]*(?=\n)|$)\n?", re.MULTILINE)
+
+
+def _strip_figure_placeholders(text: str) -> str:
+    """Drop OCR ``![figure](figure)`` placeholders no crop replaced.
+
+    Figure extraction swaps placeholders for crops; the rest (a logo, a
+    picture every figure filter rejected, a run without figures) would be
+    broken image links. A paragraph of only placeholders goes with its
+    paragraph break; one mid-line leaves a single space between its neighbors.
+    """
+    text = _PLACEHOLDER_LINE_RE.sub("", text)
+
+    def repl(m: re.Match) -> str:
+        s, e = m.span()
+        inline = s > 0 and text[s - 1] != "\n" and e < len(text) and text[e] != "\n"
+        return " " if inline else ""
+
+    return _PLACEHOLDER_SPAN_RE.sub(repl, text)
 
 
 # ---------------------------------------------------------------------------

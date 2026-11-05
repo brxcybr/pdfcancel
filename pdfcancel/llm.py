@@ -20,7 +20,7 @@ import json
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from threading import Event
+from threading import Event, Lock
 
 from rich.console import Console
 
@@ -125,10 +125,23 @@ def _auth_headers(settings: Settings) -> dict[str, str]:
 
 
 STREAM_CHECK_CHARS = 1500  # re-test stop_when after this much new text
+STALL_NOTICE_S = 120.0     # name the pages still out when none finishes for this long
+
+# PyMuPDF is not thread-safe; page workers that render (region splitting)
+# take this lock.
+_PDF_LOCK = Lock()
 
 
-def _stream(client, url: str, payload: dict, headers: dict, stop_when) -> str:
-    """POST a streaming chat request; stop reading once ``stop_when(text)``."""
+def _stream(client, url: str, payload: dict, headers: dict, stop_when,
+            deadline: float | None = None) -> str:
+    """POST a streaming chat request; stop reading once ``stop_when(text)``.
+
+    The client's read timeout only fires when the server goes silent; a
+    stream that keeps trickling (keep-alive lines, a stalled backend) would
+    hold its worker forever. ``deadline`` (seconds) caps the whole reply, the
+    budget an unstreamed request had, and raises a retryable TimeoutError.
+    """
+    end = time.monotonic() + deadline if deadline else None
     with client.stream("POST", url, json=payload, headers=headers) as resp:
         resp.raise_for_status()
         if "text/event-stream" not in resp.headers.get("content-type", ""):
@@ -137,6 +150,8 @@ def _stream(client, url: str, payload: dict, headers: dict, stop_when) -> str:
         parts: list[str] = []
         size = checked = 0
         for line in resp.iter_lines():
+            if end is not None and time.monotonic() > end:
+                raise TimeoutError(f"no complete reply within {deadline:.0f}s")
             if not line.startswith("data:"):
                 continue
             data = line[5:].strip()
@@ -286,7 +301,8 @@ def chat_vision(
         if stop_when is not None:
             return with_retry(
                 lambda: _stream(client, url, {**payload, "stream": True},
-                                _auth_headers(settings), stop_when),
+                                _auth_headers(settings), stop_when,
+                                deadline=settings.ocr_timeout),
                 description=f"vlm chat ({model})",
                 attempts=settings.ocr_retries,
                 base_delay=settings.ocr_backoff,
@@ -383,7 +399,7 @@ def page_region_asks(pdf_path: Path, index: int, settings: Settings, ask_image) 
 
     flags = pymupdf.TEXTFLAGS_TEXT | pymupdf.TEXT_DEHYPHENATE
     asks = []
-    with pymupdf.open(str(pdf_path)) as doc:
+    with _PDF_LOCK, pymupdf.open(str(pdf_path)) as doc:
         page = doc[index]
         regions = page_regions(page)
         for i, r in enumerate(regions, 1):
@@ -566,7 +582,17 @@ def vlm_ocr_pdf(
                         inflight[executor.submit(_transcribe, idx)] = idx
 
                     while inflight:
-                        done_set, _ = wait(inflight, return_when=FIRST_COMPLETED)
+                        done_set, _ = wait(inflight, timeout=STALL_NOTICE_S,
+                                           return_when=FIRST_COMPLETED)
+                        if not done_set:
+                            # Progress prints only when a page finishes, so a
+                            # stall would otherwise be silent.
+                            out = ", ".join(str(i + 1) for i in sorted(inflight.values()))
+                            console.print(
+                                f"    [yellow]… no page finished in {STALL_NOTICE_S:.0f}s; "
+                                f"waiting on page(s) {out}[/yellow]"
+                            )
+                            continue
                         for fut in done_set:
                             idx = inflight.pop(fut)
                             try:

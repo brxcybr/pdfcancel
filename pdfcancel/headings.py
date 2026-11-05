@@ -11,14 +11,17 @@ section heading as a plain line (``2.1. Related surveys``, ``II. METHODOLOGY``).
   plausible next section (so a numbered list in the body is left alone);
 - puts unnumbered headings one level below the section they sit in.
 
-A document with no section numbering is left unchanged.
+A document with no section numbering is left unchanged by
+:func:`normalize_headings`; :func:`font_heading_levels` levels its headings
+by the type sizes in the PDF's text layer instead.
 """
 
 from __future__ import annotations
 
 import re
+from collections import Counter
 
-from pdfcancel.pages import is_page_marker_line
+from pdfcancel.pages import PAGE_MARKER_RE, is_page_marker_line
 
 _DECIMAL = re.compile(r"(\d{1,2}(?:\.\d{1,2}){0,3})\.?\s+(\S.*)")
 _ROMAN = re.compile(r"([IVX]{1,5})\.\s+(\S.*)")
@@ -103,10 +106,9 @@ def _blocks(lines: list[str]) -> list[int]:
     return out
 
 
-def normalize_headings(markdown: str) -> str:
-    """Heading levels from section numbering (see the module docstring)."""
-    lines = markdown.split("\n")
-    found: list[tuple[int, int, str, tuple[int, ...] | None]] = []  # (line, level, scheme, num)
+def _find(lines: list[str]) -> list[tuple[int, int, str, tuple[int, ...] | None]]:
+    """``[(line, level, scheme, number)]`` for headings and numbered section lines."""
+    found: list[tuple[int, int, str, tuple[int, ...] | None]] = []
     last: dict[str, tuple[int, ...] | None] = {"decimal": None, "roman": None, "letter": None}
     for i in _blocks(lines):
         level, text = _plain(lines[i])
@@ -132,7 +134,18 @@ def normalize_headings(markdown: str) -> str:
             last["letter"] = None
         last[scheme] = num
         found.append((i, level, scheme, num))
+    return found
 
+
+def is_numbered(markdown: str) -> bool:
+    """True when the document numbers its sections (normalize_headings applies)."""
+    return sum(1 for f in _find(markdown.split("\n")) if f[3] is not None) >= MIN_NUMBERED
+
+
+def normalize_headings(markdown: str) -> str:
+    """Heading levels from section numbering (see the module docstring)."""
+    lines = markdown.split("\n")
+    found = _find(lines)
     if sum(1 for f in found if f[3] is not None) < MIN_NUMBERED:
         return markdown
 
@@ -155,4 +168,148 @@ def normalize_headings(markdown: str) -> str:
         if scheme:
             started, section = True, new
         lines[i] = "#" * new + " " + text
+    return "\n".join(lines)
+
+
+# ── Unnumbered documents: levels from font sizes ─────────────────────────────
+
+FONT_MIN_HEADINGS = 5   # fewer headings than this: leave the model's levels
+SIZE_TIER = 0.75        # pt: sizes this close are one heading level
+_KEY = re.compile(r"[^a-z0-9]+")
+
+
+def _key(text: str) -> str:
+    """Letters and digits only, for matching a heading to the text layer."""
+    import unicodedata
+
+    return _KEY.sub("", unicodedata.normalize("NFKC", text).lower())
+
+
+def _bold(span: dict) -> bool:
+    return bool(span["flags"] & 16) or "bold" in span["font"].lower()
+
+
+def _page_lines(page) -> list[tuple[str, float, bool]]:
+    """``[(key, size, bold)]`` for each text line of ``page``; none for a scan.
+
+    A scan's OCR text layer is drawn invisible (render mode 3) under the page
+    image, and its type sizes are estimates, so it gives no evidence.
+    """
+    trace = page.get_texttrace()
+    chars = sum(len(sp["chars"]) for sp in trace)
+    if chars and sum(len(sp["chars"]) for sp in trace if sp["type"] == 3) >= chars / 2:
+        return []
+    out = []
+    for block in page.get_text("dict")["blocks"]:
+        for line in block.get("lines", []):
+            spans = [sp for sp in line["spans"] if sp["text"].strip()]
+            if spans:
+                big = max(spans, key=lambda sp: sp["size"])
+                out.append((_key("".join(sp["text"] for sp in spans)),
+                            round(big["size"] * 2) / 2, any(_bold(sp) for sp in spans)))
+    return out
+
+
+def _style(key: str, lines: list[tuple[str, float, bool]], body: float) -> float | None:
+    """Font size of the heading ``key`` on its page, or ``None`` without evidence.
+
+    The largest matching line wins: a heading also appears in running headers
+    and the table of contents in smaller type. A heading wrapped over lines
+    matches when consecutive lines join to exactly its text; a bold run-in
+    heading matches the line it starts.
+    """
+    best = None
+    for j, (k, size, bold) in enumerate(lines):
+        if not k:
+            continue
+        if not (k == key or (len(key) >= 8 and k.startswith(key))):
+            if not key.startswith(k):
+                continue
+            for k2, s2, b2 in lines[j + 1:j + 4]:  # a wrapped heading
+                k, size, bold = k + k2, max(size, s2), bold or b2
+                if len(k) >= len(key):
+                    break
+            if k != key:
+                continue
+        if (size > body or (bold and size >= body)) and (best is None or size > best):
+            best = size
+    return best
+
+
+def font_heading_levels(markdown: str, pdf_path) -> str:
+    """Heading levels from the PDF's font sizes, for unnumbered documents.
+
+    Without numbering, each page's levels are the model's guess from that page
+    alone (a book's every section came out as ``#``). On a born-digital PDF,
+    the type size of each heading in the text layer (sizes within
+    ``SIZE_TIER`` of each other counted as one) ranks them document-wide:
+    the largest size used by two or more headings is ``#``, the next ``##``,
+    and so on; a one-off size takes the level of the next larger size, and a
+    one-off larger than all of them (a title) is ``#`` above the rest. A
+    heading missing from its page's text layer (text in a figure) is kept
+    out of the top level. Needs page markers; numbered documents, scans
+    (including scans with an OCR text layer), and documents with few
+    headings are returned unchanged.
+    """
+    if is_numbered(markdown) or not PAGE_MARKER_RE.search(markdown):
+        return markdown
+    lines = markdown.split("\n")
+    heads: list[tuple[int, int, int, str]] = []  # (line, page, level, key)
+    page, fenced = 0, False
+    for i, ln in enumerate(lines):
+        m = PAGE_MARKER_RE.fullmatch(ln.strip())
+        if m:
+            page, fenced = int(m.group(1)), False
+            continue
+        if ln.lstrip().startswith("```"):
+            fenced = not fenced
+        if fenced:
+            continue  # "# comment" in a code sample is not a heading
+        level, text = _plain(ln)
+        if level and page and _key(text):
+            heads.append((i, page, level, _key(text)))
+    if len(heads) < FONT_MIN_HEADINGS:
+        return markdown
+
+    import pymupdf
+
+    sizes: dict[int, float | None] = {}
+    with pymupdf.open(str(pdf_path)) as doc:
+        chars: Counter[float] = Counter()
+        cache: dict[int, list] = {}
+        for pg in sorted({h[1] for h in heads if h[1] <= doc.page_count}):
+            cache[pg] = _page_lines(doc[pg - 1])
+            for k, size, _ in cache[pg]:
+                chars[size] += len(k)
+        if not chars:
+            return markdown  # a scan: no text layer to read sizes from
+        body = chars.most_common(1)[0][0]
+        for i, pg, _, key in heads:
+            if cache.get(pg):  # pages without a text layer give no evidence
+                sizes[i] = _style(key, cache[pg], body)
+
+    tier: dict[float, float] = {}
+    for size in sorted({s for s in sizes.values() if s is not None}, reverse=True):
+        top = next(iter(reversed(tier.values())), None)
+        tier[size] = top if top is not None and top - size <= SIZE_TIER else size
+    sizes = {i: s if s is None else tier[s] for i, s in sizes.items()}
+    counts = Counter(s for s in sizes.values() if s is not None)
+    ranked = sorted((s for s, c in counts.items() if c >= 2), reverse=True)
+    if len(ranked) < 2:
+        return markdown
+    offset = 1 if any(s > ranked[0] for s in counts) else 0
+    rank = {s: k + 1 + offset for k, s in enumerate(ranked)}
+
+    def level_for(size: float) -> int:
+        if size in rank:
+            return rank[size]
+        larger = [s for s in ranked if s > size]
+        return rank[larger[-1]] if larger else 1
+
+    for i, _, level, _ in heads:
+        if i not in sizes:
+            continue
+        size = sizes[i]
+        new = level_for(size) if size is not None else max(level, offset + 2)
+        lines[i] = "#" * min(new, 6) + " " + _plain(lines[i])[1]
     return "\n".join(lines)

@@ -297,3 +297,25 @@ def test_streamed_reply_runs_to_the_end_and_tolerates_plain_json(monkeypatch):
                           http_client=_sse_client([], {}, "application/json"),
                           stop_when=lambda t: False)
     assert out == "plain"  # a server that ignores "stream"
+
+
+def test_a_stream_that_never_finishes_times_out():
+    """Keep-alive lines reset the read timeout; the reply still has a deadline."""
+    import time
+
+    import httpx
+
+    def trickle():
+        while True:
+            time.sleep(0.02)
+            yield b": keep-alive\n\n"
+
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: httpx.Response(
+        200, content=trickle(), headers={"content-type": "text/event-stream"})))
+    settings = Settings(api_base="https://h/v1", ocr_engine="vlm", ocr_timeout=0.2,
+                        ocr_retries=1)
+    start = time.monotonic()
+    with pytest.raises(TimeoutError):
+        llm.chat_vision(settings, image_bytes=b"z", prompt="p", model="m",
+                        http_client=client, stop_when=lambda t: False)
+    assert time.monotonic() - start < 2

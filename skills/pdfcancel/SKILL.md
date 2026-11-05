@@ -106,7 +106,8 @@ on the vlm engine. Per PDF:
    embedded text, so names, identifiers, and numbers are spelled as printed.
    A page that loops is retried, then transcribed column by column; leftover
    loops are cut and marked `<!-- pdfcancel: repeated text removed -->`.
-   Heading levels follow the section numbering (`2.1` → `###`).
+   Heading levels follow the section numbering (`2.1` → `###`), or the
+   headings' type sizes in an unnumbered born-digital document.
 2. **Figures:** detected locally with PyMuPDF. That covers embedded images, vector
    drawing clusters (most charts), and nearby axis and legend labels (text or
    outlined glyphs). Each
@@ -200,5 +201,11 @@ Use this when a figure is missing or ambiguous in the converted output.
 - **Truncated pages:** per-page OCR output is capped at 4096 tokens. Split
   dense pages with `ask`.
 - **Timeouts:** raise `--ocr-timeout 300` and lower `--ocr-concurrency 2`.
+- **A run looks stuck:** progress prints only when a page finishes. A
+  `waiting on page(s) …` line every two minutes means requests are out but
+  not coming back (a busy or stalled server); each is abandoned and retried
+  after `--ocr-timeout`. Silence with no such line means the process itself
+  is blocked; on macOS, `sample <pid> 5` shows where before you stop it.
+  Either way, re-running the same command resumes.
 - **Wrong or noisy crops:** delete `<stem>_images/` and re-run with `--force`.
   Use `ask` for anything detection missed.

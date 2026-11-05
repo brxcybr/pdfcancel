@@ -46,17 +46,20 @@ def _loops(text: str) -> list[tuple[int, int, int]]:
                 break
             if i + 2 * p > n:
                 break
+            # Numbers and table rows (a column of checkboxes) legitimately
+            # repeat; a loop has words and no cell borders. Checked before
+            # scanning: rescanning a long table run from every token is
+            # quadratic, and this runs on every streamed chunk.
+            unit = words[i:i + p]
+            if "|" in unit or not any(_WORDLIKE.search(w) for w in unit):
+                continue
             j = i
             while j + p < n and words[j] == words[j + p]:
                 j += 1
             span = j - i + p  # tokens covered by the repeating run
             if span // p >= LOOP_MIN_REPEATS and span >= LOOP_MIN_WORDS:
-                unit = words[i:i + p]
-                # Numbers and table rows (a column of checkboxes) legitimately
-                # repeat; a loop has words and no cell borders.
-                if "|" not in unit and any(_WORDLIKE.search(w) for w in unit):
-                    found = (i, i + span, p)
-                    break
+                found = (i, i + span, p)
+                break
         if found:
             out.append(found)
             i = found[1]
