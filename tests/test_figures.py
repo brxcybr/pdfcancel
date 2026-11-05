@@ -547,3 +547,107 @@ def test_placeholder_with_alt_text_takes_the_photo(tmp_path):
     md, _ = figures.extract_figures(path, md)
     assert md.index("![p001-f02.png](p001-f02.png)") < md.index("The end.")
     assert "(figure)" not in md
+
+
+# ── Scans, panels, and empty boxes (figure noise, round 2) ───────────────────
+
+def _scan_page(doc, *, ocr: bool, box=(60, 60, 550, 640)):
+    p = doc.new_page(width=612, height=792)
+    p.insert_image(pymupdf.Rect(*box), stream=_png(400, 480))
+    if ocr:  # an OCR layer: invisible text over the scan
+        p.insert_textbox(pymupdf.Rect(*box), "Scanned words of a book chapter. " * 40,
+                         fontsize=10, render_mode=3)
+    return p
+
+
+def test_scan_with_margins_and_an_ocr_layer_is_not_a_figure(tmp_path):
+    doc = pymupdf.open()
+    _scan_page(doc, ocr=True)  # 70% of the page: below the full-page test
+    path = tmp_path / "scan.pdf"
+    doc.save(str(path))
+    rects, scanned = figures.detect_figures(pymupdf.open(str(path))[0])
+    assert rects == [] and scanned
+
+
+def test_scanned_document_without_text_has_no_figures(tmp_path):
+    doc = pymupdf.open()
+    for _ in range(3):
+        _scan_page(doc, ocr=False)
+    path = tmp_path / "scans.pdf"
+    doc.save(str(path))
+    doc = pymupdf.open(str(path))
+    assert figures.scanned_document(doc)
+    assert all(figures.detect_figures(p, scan_doc=True)[0] == [] for p in doc)
+
+
+def test_a_full_page_picture_in_a_born_digital_document_is_kept(tmp_path):
+    doc = pymupdf.open()
+    for _ in range(3):
+        doc.new_page(width=612, height=792).insert_textbox(
+            pymupdf.Rect(72, 72, 540, 700), "Body prose of a born-digital report. " * 30)
+    _scan_page(doc, ocr=False)  # one text-less page holding a large picture
+    path = tmp_path / "report.pdf"
+    doc.save(str(path))
+    doc = pymupdf.open(str(path))
+    assert not figures.scanned_document(doc)
+    assert len(figures.detect_figures(doc[3], scan_doc=False)[0]) == 1
+
+
+def test_tail_of_a_code_box_is_not_a_figure(tmp_path):
+    """A code box split across pages leaves a frame and a closing bracket."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    p.draw_rect(pymupdf.Rect(72, 72, 540, 114), color=None, fill=(0.91, 0.94, 0.96))
+    for r in ((72, 72, 73, 114), (540, 72, 541, 114), (72, 114, 541, 115)):  # frame rules
+        p.draw_rect(pymupdf.Rect(*r), color=None, fill=(0.3, 0.47, 0.72))
+    p.insert_text((90, 90), "]", fontsize=8, fontname="cour")
+    p.insert_text((80, 104), "}", fontsize=8, fontname="cour")
+    path = tmp_path / "tail.pdf"
+    doc.save(str(path))
+    assert figures.detect_figures(pymupdf.open(str(path))[0])[0] == []
+
+
+def _cards_page(doc):
+    p = doc.new_page(width=612, height=792)
+    for i in range(8):  # bordered cards of running text, close enough to cluster
+        x, y = 72 + (i % 2) * 226, 120 + (i // 2) * 136
+        p.draw_rect(pymupdf.Rect(x, y, x + 220, y + 130), color=(0.2, 0.6, 0.3), width=1)
+        p.insert_textbox(pymupdf.Rect(x + 8, y + 8, x + 212, y + 122),
+                         "Each card holds a few sentences of advice on the practice. " * 3,
+                         fontsize=9)
+
+
+def test_cards_of_running_text_are_not_a_figure(tmp_path):
+    doc = pymupdf.open()
+    _cards_page(doc)
+    path = tmp_path / "cards.pdf"
+    doc.save(str(path))
+    assert figures.detect_figures(pymupdf.open(str(path))[0])[0] == []
+
+
+def test_bar_chart_with_sentence_labels_is_kept(tmp_path):
+    """A Likert chart labels its rows with statements; its bars hold no text."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    for i in range(6):
+        y = 150 + i * 22
+        p.insert_text((72, y + 12), f"Statement {i} that respondents rated on the scale",
+                      fontsize=9)
+        x = 330
+        for k, w in enumerate((10, 25, 30, 40, 60)):
+            p.draw_rect(pymupdf.Rect(x, y, x + w, y + 16), color=None,
+                        fill=(0.9 - 0.15 * k, 0.6, 0.3 + 0.1 * k))
+            x += w
+    p.draw_line((395, 140), (395, 290), color=(0.5, 0.5, 0.5))  # the neutral axis
+    path = tmp_path / "likert.pdf"
+    doc.save(str(path))
+    assert len(figures.detect_figures(pymupdf.open(str(path))[0])[0]) == 1
+
+
+def test_an_empty_box_is_not_a_figure(tmp_path):
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    p.draw_rect(pymupdf.Rect(100, 200, 400, 400), color=None, fill=(0.93, 0.93, 0.93))
+    path = tmp_path / "empty.pdf"
+    doc.save(str(path))
+    assert figures.detect_figures(pymupdf.open(str(path))[0])[0] == []
