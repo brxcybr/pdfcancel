@@ -200,5 +200,11 @@ Use this when a figure is missing or ambiguous in the converted output.
 - **Truncated pages:** per-page OCR output is capped at 4096 tokens. Split
   dense pages with `ask`.
 - **Timeouts:** raise `--ocr-timeout 300` and lower `--ocr-concurrency 2`.
+- **A run looks stuck:** progress prints only when a page finishes. A
+  `waiting on page(s) …` line every two minutes means requests are out but
+  not coming back (a busy or stalled server); each is abandoned and retried
+  after `--ocr-timeout`. Silence with no such line means the process itself
+  is blocked; on macOS, `sample <pid> 5` shows where before you stop it.
+  Either way, re-running the same command resumes.
 - **Wrong or noisy crops:** delete `<stem>_images/` and re-run with `--force`.
   Use `ask` for anything detection missed.

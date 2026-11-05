@@ -48,6 +48,16 @@ def test_legitimate_repetition_is_not_a_loop(text):
     assert not find_loop(text)
 
 
+def test_loop_check_stays_fast_on_long_tables():
+    """It runs on every streamed chunk; a long table run must not make it quadratic."""
+    import time
+
+    text = "| " * 6000 + "\n" + "the same words again " * 40
+    start = time.perf_counter()
+    assert find_loop(text)  # a loop after the table is still found
+    assert time.perf_counter() - start < 1.0
+
+
 def _ocr_settings(**kw) -> Settings:
     return Settings(api_base="https://h/v1", ocr_engine="vlm", vlm_model="m",
                     ocr_concurrency=1, **kw)
@@ -78,6 +88,21 @@ def _fake_chat(replies, calls):
         calls.append({"prompt": prompt, "history": history})
         return replies[min(len(calls), len(replies)) - 1]
     return fake
+
+
+def test_a_stall_names_the_pages_still_out(monkeypatch):
+    """Progress prints only when a page finishes; a stall says what it waits on."""
+    import time
+
+    monkeypatch.setattr(llm, "STALL_NOTICE_S", 0.05)
+    said: list[str] = []
+    monkeypatch.setattr(llm.console, "print", lambda msg, *a, **k: said.append(str(msg)))
+    settings = _ocr_settings()
+    monkeypatch.setattr(llm, "rasterize_pdf", lambda p, dpi=200: [b"img"])
+    monkeypatch.setattr(llm, "chat_vision", lambda *a, **k: time.sleep(0.3) or "Page.")
+    monkeypatch.setattr(settings, "build_vision_http_client", lambda: _Closeable())
+    assert llm.vlm_ocr_pdf(Path("x.pdf"), settings).markdown == "Page."
+    assert any("waiting on page(s) 1" in m for m in said)
 
 
 def test_looping_page_is_retried(monkeypatch):
