@@ -61,8 +61,6 @@ VLM_OCR_PROMPT = (
     "invent content that is not visibly present.\n"
     "- Include footnotes, endnotes, in-text citations, and the full reference "
     "or bibliography list.\n"
-    "- Never estimate a chart value that is not printed on it (no \"~45%\" "
-    "read off a bar or slice).\n"
     "- Output only the page's Markdown: no surrounding code fence, no preamble, "
     "and no trailing notes."
 )
