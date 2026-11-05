@@ -153,11 +153,14 @@ def convert_single(
         # --images/--embed-images/--full are cropped locally (pdfcancel.figures),
         # which needs page markers to place each crop on its page.
         from pdfcancel.llm import vlm_ocr_pdf
+        from pdfcancel.pages import strip_page_markers
         want_figures = full or extract_images or embed_images
         ocr_result = vlm_ocr_pdf(
             pdf_path,
             settings,
-            preserve_pages=preserve_pages or want_figures,
+            # Markers place figure crops and match headings to their pages;
+            # they are stripped below unless the user asked for them.
+            preserve_pages=True,
             cache_dir=output_dir,
             stop=stop,
             # Figure cropping and --full descriptions run after OCR and can
@@ -169,9 +172,11 @@ def convert_single(
         raw_images = ocr_result.images
         ocr_page_count = ocr_result.page_count
         ocr_cleanup = ocr_result.cleanup
+        if not no_clean:
+            from pdfcancel.headings import font_heading_levels
+            markdown_content = font_heading_levels(markdown_content, pdf_path)
         if want_figures:
             from pdfcancel.figures import extract_figures
-            from pdfcancel.pages import strip_page_markers
             if full and settings.vlm_chart_pass:
                 chart_images = {}
             markdown_content, raw_images = extract_figures(
@@ -180,8 +185,8 @@ def convert_single(
                 chart_dpi=settings.chart_dpi,
             )
             console.print(f"    Cropped {len(raw_images)} figure(s) locally")
-            if not preserve_pages:
-                markdown_content = strip_page_markers(markdown_content)
+        if not preserve_pages:
+            markdown_content = strip_page_markers(markdown_content)
     elif use_sdk:
         # Use mistralai SDK directly to get text, page list, and image data
         from pdfcancel.images import ocr_with_images

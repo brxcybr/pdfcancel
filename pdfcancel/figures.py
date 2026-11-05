@@ -31,7 +31,9 @@ from typing import NamedTuple
 
 from pdfcancel.pages import PAGE_MARKER_RE
 
-PLACEHOLDER_RE = re.compile(r"!\[figure\]\(figure\)")
+# The OCR prompt asks for ``![figure](figure)``; models sometimes fill in the
+# alt text (``![MANDIANT](figure)``).
+PLACEHOLDER_RE = re.compile(r"!\[[^\]\n]*\]\(figure\)")
 _CAPTION = r"(?:fig(?:ure)?|chart|exhibit|plate)\.?\s*(\d+[a-z]?)\b"
 CAPTION_RE = re.compile(r"\s*" + _CAPTION, re.IGNORECASE)               # text-layer block
 CAPTION_LINE_RE = re.compile(r"^[ \t>*_#]*" + _CAPTION, re.IGNORECASE | re.MULTILINE)
@@ -52,6 +54,7 @@ CODE_BOX_MONO = 0.5        # vector region whose text is mostly monospace = code
 CODE_LINE_CHARS = 30       # ... with a monospace line this long (code, not a node label)
 MONO_FONT_RE = re.compile(r"mono|courier|consol|menlo|code|typewriter", re.IGNORECASE)
 REPEAT_PAGES = 3           # identical crops on this many pages are logos
+INVISIBLE_MIN = 0.97       # a fill/stroke with every channel at least this light is white
 
 
 def _pymupdf():
@@ -83,6 +86,13 @@ def _merge(rects: Iterable, gap: float = 6) -> list:
                 out.append(pymupdf.Rect(r))
         rects = out
     return rects
+
+
+def _visible(d: dict) -> bool:
+    """True for a drawing that shows on a white page: a non-white fill or stroke."""
+    kind = d.get("type") or ""
+    colors = [d.get("fill") if "f" in kind else None, d.get("color") if "s" in kind else None]
+    return any(c is not None and min(c, default=1.0) < INVISIBLE_MIN for c in colors)
 
 
 def _has_listing(lines: list, *, margin: float = 2.5) -> bool:
@@ -124,6 +134,11 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
         clusters = page.cluster_drawings()
     except Exception:
         clusters = []
+    drawings = page.get_drawings()
+    # Some exporters paint a white box behind every text line; clustered, a
+    # paragraph's boxes look like a figure. A cluster of only invisible marks
+    # is not one.
+    visible = [pymupdf.Rect(d["rect"]) for d in drawings if _visible(d)]
     tables = []
     if not include_tables:
         try:
@@ -135,6 +150,8 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
         if r.is_empty or r.get_area() >= FULL_PAGE * page_area:
             continue
         if r.y1 <= top or r.y0 >= bottom:  # header/footer rules and logos
+            continue
+        if not any(v in r + (-1, -1, 1, 1) for v in visible):
             continue
         # Ruled tables are already transcribed as markdown tables by the OCR.
         if any((r & t).get_area() >= 0.6 * r.get_area() for t in tables):
@@ -152,7 +169,7 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
     # Shaded code/spec/callout boxes are vector rectangles full of prose. Charts
     # with long category labels look text-heavy too, but they are drawn from
     # many marks (bars, points); row bands, frames, and rules don't count.
-    paths = [pymupdf.Rect(d["rect"]) for d in page.get_drawings()]
+    paths = [pymupdf.Rect(d["rect"]) for d in drawings]
 
     def is_text_box(r) -> bool:
         if any((r & i).get_area() >= 0.2 * r.get_area() for i in images):

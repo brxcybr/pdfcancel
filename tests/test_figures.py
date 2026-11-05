@@ -152,6 +152,14 @@ def test_born_digital_placeholder_without_figure_stays_placeholder(tmp_path):
     assert images == {} and "![figure](figure)" in md
 
 
+def test_cleanup_drops_placeholders_no_crop_took():
+    from pdfcancel.clean import clean_markdown
+
+    md = ("Intro.\n\n![figure](figure)\n\n![MANDIANT](figure) Analyst Program "
+          "![chart](figure) Framework\n\nEnd.")
+    assert clean_markdown(md) == "Intro.\n\nAnalyst Program Framework\n\nEnd."
+
+
 # ── vlm-engine --full through convert_single ─────────────────────────────────
 
 def _fake_vlm_ocr(markdown: str, events: list | None = None):
@@ -446,6 +454,21 @@ def test_skips_callout_with_one_long_monospace_line(tmp_path):
     assert figures.detect_figures(pymupdf.open(str(path))[0])[0] == []
 
 
+def test_white_boxes_behind_text_lines_are_not_a_figure(tmp_path):
+    """Some exporters paint a white box behind every line; clustered, they look like a figure."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    for i in range(6):  # boxes behind parts of lines; the text runs past them
+        y = 200 + i * 12.2
+        p.draw_rect(pymupdf.Rect(72 if i % 2 else 260, y - 10, 430, y + 2.2), color=None,
+                    fill=(1, 1, 1))
+        p.insert_text((72, y), "Body text over a white highlight, as a word processor "
+                      "exported it, one line after another line.", fontsize=10)
+    path = tmp_path / "white.pdf"
+    doc.save(str(path))
+    assert figures.detect_figures(pymupdf.open(str(path))[0])[0] == []
+
+
 def test_crop_takes_in_tick_labels_drawn_as_outlines(tmp_path):
     """Text exported as glyph paths is too small to cluster but is still a label."""
     doc = pymupdf.open()
@@ -514,3 +537,13 @@ def test_uncaptioned_placeholder_goes_to_the_pictorial_crop(tmp_path):
     md, _ = figures.extract_figures(path, md)
     photo, chart = "![p001-f02.png](p001-f02.png)", "![p001-f01.png](p001-f01.png)"
     assert md.index(photo) < md.index("The end.") < md.index(chart)  # chart appended
+
+
+def test_placeholder_with_alt_text_takes_the_photo(tmp_path):
+    """Models sometimes fill in the alt text: ``![warehouse](figure)``."""
+    path = _chart_then_photo_pdf(tmp_path / "cp.pdf", captions=False)
+    md = join_pages(["North South West\n\n![warehouse](figure)\n\nThe end."],
+                    preserve_pages=True)
+    md, _ = figures.extract_figures(path, md)
+    assert md.index("![p001-f02.png](p001-f02.png)") < md.index("The end.")
+    assert "(figure)" not in md

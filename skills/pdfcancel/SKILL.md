@@ -106,7 +106,8 @@ on the vlm engine. Per PDF:
    embedded text, so names, identifiers, and numbers are spelled as printed.
    A page that loops is retried, then transcribed column by column; leftover
    loops are cut and marked `<!-- pdfcancel: repeated text removed -->`.
-   Heading levels follow the section numbering (`2.1` → `###`).
+   Heading levels follow the section numbering (`2.1` → `###`), or the
+   headings' type sizes in an unnumbered born-digital document.
 2. **Figures:** detected locally with PyMuPDF. That covers embedded images, vector
    drawing clusters (most charts), and nearby axis and legend labels (text or
    outlined glyphs). Each
