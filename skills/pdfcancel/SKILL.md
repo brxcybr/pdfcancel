@@ -104,10 +104,12 @@ on the vlm engine. Per PDF:
    `PDFCANCEL_VLM_MODEL`. That includes tables, math, captions, and the text
    inside figures. On born-digital pages the model also gets the PDF's
    embedded text, so names, identifiers, and numbers are spelled as printed.
-   A page that loops is retried; leftover loops are cut and marked
-   `<!-- pdfcancel: repeated text removed -->`.
+   A page that loops is retried, then transcribed column by column; leftover
+   loops are cut and marked `<!-- pdfcancel: repeated text removed -->`.
+   Heading levels follow the section numbering (`2.1` → `###`).
 2. **Figures:** detected locally with PyMuPDF. That covers embedded images, vector
-   drawing clusters (most charts), and nearby axis and legend labels. Each
+   drawing clusters (most charts), and nearby axis and legend labels (text or
+   outlined glyphs). Each
    figure is cropped to `<stem>_images/pNNN-fKK.png` and placed at its OCR
    placeholder or printed caption, else at the end of its page. Running headers, repeated logos, ruled tables,
    and shaded code or text boxes are skipped, because the OCR already
@@ -115,8 +117,10 @@ on the vlm engine. Per PDF:
    full-page render instead.
 3. **Describe:** each crop goes to `PDFCANCEL_VLM_FULL_MODEL` (default: the OCR
    model) along with the surrounding text and any text printed inside the
-   figure. The result is a `> **Figure description:**` block, plus a data
-   table and hidden chart JSON for charts and visual tables. Chart data says
+   figure. Charts first get a data-only pass: the OCR model reads their values
+   from a 300-DPI render, and the description is written from them. The
+   result is a `> **Figure description:**` block, plus a data table and
+   hidden chart JSON for charts and visual tables. Chart data says
    `confidence=exact` only when every value is printed in the figure; treat
    `estimated` values as read off the graphic.
 4. **Chunk:** hierarchical chunks, with figure blocks kept whole and tied to
@@ -133,9 +137,11 @@ $W convert paper.pdf --index mylib           # also add to a search index
 - **Resumable:** finished PDFs are skipped as unchanged, and pages are
   checkpointed under `.pdfcancel_cache/`. After an interruption, re-run the
   same command.
-- **Cost:** OCR takes roughly 15–20 s per page at concurrency 4. Each figure
-  description takes roughly 10 s. A 30-page paper with 20 figures takes
-  several minutes, so run directories in the background.
+- **Cost:** about 5 s per page of wall time at the default concurrency 8
+  (OCR, figures, and chart data together); set `PDFCANCEL_OCR_CONCURRENCY=16`
+  for roughly twice the OCR throughput if the server has room. A 30-page
+  paper with 20 figures takes a few minutes, so run directories in the
+  background.
 
 ### `ocr`: text-only pass
 

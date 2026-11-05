@@ -186,7 +186,7 @@ def test_vlm_resume_skips_cached_pages(tmp_path, monkeypatch):
 
     calls: list[int] = []
 
-    def _fake_chat(s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None):
+    def _fake_chat(s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None, stop_when=None):
         calls.append(image_bytes)
         return f"FRESH[{image_bytes.decode()}]"
 
@@ -206,7 +206,7 @@ def test_vlm_one_bad_page_is_incomplete_and_keeps_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "rasterize_pdf", lambda p, dpi=200: [b"img0", b"img1"])
     monkeypatch.setattr(settings, "build_vision_http_client", lambda: _NoopClient())
 
-    def _chat_fail_page2(s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None):
+    def _chat_fail_page2(s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None, stop_when=None):
         if image_bytes == b"img1":
             raise RuntimeError("boom")
         return f"OK[{image_bytes.decode()}]"
@@ -227,7 +227,7 @@ def test_vlm_one_bad_page_is_incomplete_and_keeps_cache(tmp_path, monkeypatch):
     # Second run: page 2 now succeeds, resumes from the cached page 1.
     calls: list[bytes] = []
 
-    def _chat_ok(s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None):
+    def _chat_ok(s, *, image_bytes, prompt, model, max_tokens=None, mime="image/png", http_client=None, stop_when=None):
         calls.append(image_bytes)
         return f"OK[{image_bytes.decode()}]"
 

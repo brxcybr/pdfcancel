@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import re
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -18,9 +19,13 @@ from threading import Event
 from rich.console import Console
 
 from pdfcancel.charts import (
+    CHART_DATA_PROMPT,
+    CHART_JSON_START,
     chart_data_comment,
+    chart_has_data,
     chart_prompt_instructions,
     ground_chart,
+    parse_chart_data,
     render_chart_data_markdown,
     split_chart_json,
 )
@@ -33,6 +38,7 @@ console = Console()
 # Output cap for a vlm-engine figure description. The structured chart payload
 # (CHART_JSON with every data point) needs far more room than prose alone.
 VLM_DESCRIPTION_MAX_TOKENS = 2048
+VLM_CHART_MAX_TOKENS = 3000  # step-by-step reading before the JSON
 
 # Base prompt for the vision model.
 # When surrounding document context is available, it gets prepended to this.
@@ -81,6 +87,16 @@ def _printed_section(printed: str | None) -> str:
         f'"""\n{printed[:_PRINTED_MAX_CHARS]}\n"""\n'
         "Use these exact strings for labels, names, and values. A number "
         "missing from them was not printed, so any value for it is estimated."
+    )
+
+
+def _chart_section(chart: dict) -> str:
+    """Prompt addition giving the describer values already read by the data pass."""
+    return (
+        "\n\nTHIS FIGURE'S DATA, ALREADY READ FROM A SHARPER RENDER:\n"
+        f"{json.dumps(chart, ensure_ascii=False)}\n"
+        "Use these values and labels in your description. Do not output DATA: "
+        "or CHART_JSON: sections; the data above is attached for you."
     )
 
 
@@ -153,6 +169,7 @@ def describe_images(
     markdown_content: str | None = None,
     stop: Event | None = None,
     printed_text: dict[str, str] | None = None,
+    chart_images: dict[str, bytes] | None = None,
 ) -> dict[str, str]:
     """Send each image to a vision model and return descriptions.
 
@@ -169,6 +186,10 @@ def describe_images(
             carrying the descriptions completed so far.
         printed_text: ``{image_id: text}`` printed inside each figure (its PDF
             text layer), given to the model as the exact labels and values.
+        chart_images: ``{image_id: png}`` sharper renders for the vlm engine's
+            data-only chart pass (``settings.vlm_chart_pass``): the OCR model
+            reads each figure's values first, and the describer writes its
+            prose from them. The pass's chart data replaces the describer's.
 
     Returns:
         Mapping of image ID → text description. A figure that could not be
@@ -192,9 +213,35 @@ def describe_images(
             http_client.close()
             raise
 
-        def _describe(prompt: str, data_uri: str, img_bytes: bytes, mime: str, img_id: str) -> str:
+        chart_pass = settings.vlm_chart_pass and chart_images is not None
+        try:
+            chart_model = chart_pass and (
+                settings.vlm_chart_model or resolve_vlm_model(settings, http_client=http_client))
+        except BaseException:
+            http_client.close()
+            raise
+
+        def _read_chart(img_id: str, img_bytes: bytes) -> dict | None:
+            """The data pass: values only, from the sharper render. Optional."""
             try:
-                return chat_vision(
+                reply = chat_vision(
+                    settings, image_bytes=chart_images.get(img_id, img_bytes),
+                    prompt=CHART_DATA_PROMPT + _printed_section((printed_text or {}).get(img_id)),
+                    model=chart_model, max_tokens=VLM_CHART_MAX_TOKENS, mime="image/png",
+                    http_client=http_client,
+                )
+            except (Exception, SystemExit) as e:
+                console.print(f"    [yellow]No chart data for {img_id}: {e}[/yellow]")
+                return None
+            chart = parse_chart_data(reply)
+            return chart if chart_has_data(chart) else None
+
+        def _describe(prompt: str, data_uri: str, img_bytes: bytes, mime: str, img_id: str) -> str:
+            chart = _read_chart(img_id, img_bytes) if chart_pass else None
+            if chart:
+                prompt += _chart_section(chart)
+            try:
+                text = chat_vision(
                     settings, image_bytes=img_bytes, prompt=prompt, model=model,
                     max_tokens=VLM_DESCRIPTION_MAX_TOKENS, mime=mime, http_client=http_client,
                 ).strip()
@@ -202,6 +249,10 @@ def describe_images(
                 # chat_vision reports a malformed reply via SystemExit; for one
                 # figure that is a per-image failure, not a reason to abort.
                 raise RuntimeError(str(e)) from e
+            if chart:
+                prose = split_chart_json(text)[0]
+                text = f"{prose}\n\n{CHART_JSON_START}\n{json.dumps(chart, ensure_ascii=False)}"
+            return text
     else:
         http_client = None
         workers = 1

@@ -44,10 +44,12 @@ HEADER_ZONE = 0.07         # top/bottom fraction holding running headers
 FRAGMENT_GAP = 10          # pt between graphic fragments of one figure
 LABEL_REACH = 18           # pt around a figure in which short lines join it
 LABEL_MAX_CHARS = 60
+GLYPH_MAX = 20             # pt: a drawn path this small is a label glyph (outlined text)
 PROSE_LINE_CHARS = 25    # mean chars/line of a paragraph block
 TEXTBOX_MIN_CHARS = 100    # text-box test: this much prose ...
 TEXTBOX_MAX_PATHS = 6      # ... inside at most this many drawn marks
 CODE_BOX_MONO = 0.5        # vector region whose text is mostly monospace = code box
+CODE_LINE_CHARS = 30       # ... with a monospace line this long (code, not a node label)
 MONO_FONT_RE = re.compile(r"mono|courier|consol|menlo|code|typewriter", re.IGNORECASE)
 REPEAT_PAGES = 3           # identical crops on this many pages are logos
 
@@ -166,9 +168,10 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
 
     # Spec/API documents draw request, header, and JSON callouts as vector
     # boxes with decorative marks (method badges, rules) that defeat the mark
-    # count above. Their tell is monospace text laid out as a listing: lines
-    # stacked at one left margin. A diagram may label its nodes in monospace,
-    # but those labels sit apart, one per node.
+    # count above. Their tell is monospace text laid out as a listing (lines
+    # stacked at one left margin) or a monospace line too long for a label.
+    # A diagram may label its nodes in monospace, but those labels are short
+    # and sit apart, one per node.
     def is_mono(sp: dict) -> bool:
         return bool(sp["flags"] & 8 or MONO_FONT_RE.search(sp["font"]))
 
@@ -177,6 +180,7 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
             return False
         chars = mono = 0
         mono_lines = []
+        long_line = False
         for b in blocks:
             for ln in b["lines"]:
                 lr = pymupdf.Rect(ln["bbox"])
@@ -188,9 +192,10 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
                 chars, mono = chars + n, mono + m
                 if n and m >= CODE_BOX_MONO * n:
                     mono_lines.append(lr)
+                    long_line = long_line or m >= CODE_LINE_CHARS
         if chars < 20 or mono < CODE_BOX_MONO * chars:
             return False
-        return _has_listing(mono_lines)
+        return long_line or _has_listing(mono_lines)
 
     rects = [r for r in rects if not is_text_box(r) and not is_code_box(r)]
 
@@ -209,6 +214,10 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
         if text and len(text) <= LABEL_MAX_CHARS and lr.y0 >= top and lr.y1 <= bottom
         and not is_prose(b)
     ]
+    # Charts exported with text as outlines draw tick labels as tiny glyph
+    # paths, which drawing clustering drops; they are labels too.
+    labels += [p for p in paths if 0 < p.width <= GLYPH_MAX and 0 < p.height <= GLYPH_MAX
+               and p.y0 >= top and p.y1 <= bottom]
     for r in rects:
         for _ in range(3):  # labels chain: tick -> axis title -> legend
             reach = pymupdf.Rect(r) + (-LABEL_REACH, -LABEL_REACH, LABEL_REACH, LABEL_REACH)
@@ -245,6 +254,8 @@ def extract_figures(
     dpi: int = 200,
     include_tables: bool = False,
     printed_text: dict[str, str] | None = None,
+    chart_images: dict[str, bytes] | None = None,
+    chart_dpi: int = 300,
 ) -> tuple[str, dict[str, bytes]]:
     """Crop figures from ``pdf_path`` and link them into page-marked markdown.
 
@@ -252,7 +263,9 @@ def extract_figures(
     markdown with ``![id](id)`` references and an ``{id: png_bytes}`` mapping.
     When ``printed_text`` is a dict, it is filled with ``{id: text}``: the PDF
     text layer inside each crop (labels and values exactly as printed), for
-    crops that have any.
+    crops that have any. When ``chart_images`` is a dict, it is filled with
+    ``{id: png}`` renders at ``chart_dpi`` for reading chart values (fine
+    gridlines and similar gray shades need the extra resolution).
     """
     pymupdf = _pymupdf()
     if not PAGE_MARKER_RE.search(markdown):
@@ -264,6 +277,7 @@ def extract_figures(
 
     # Render everything first so crops repeated across pages (logos) can be dropped.
     crops: dict[int, list[_Crop]] = {}
+    hires: dict[str, bytes] = {}
     seen: Counter[str] = Counter()
     try:
         for page in doc:
@@ -274,6 +288,10 @@ def extract_figures(
                       *_crop_info(page, r), _printed(page, r))
                 for k, r in enumerate(rects, 1)
             ]
+            if chart_images is not None:
+                hires.update((f"p{n:03d}-f{k:02d}.png",
+                              page.get_pixmap(dpi=chart_dpi, clip=r).tobytes("png"))
+                             for k, r in enumerate(rects, 1))
             if not rects and scanned and placeholders.get(n):
                 # A scan has no separable figures: describe the whole page. On a
                 # born-digital page, a figure every filter rejected stays a
@@ -294,6 +312,8 @@ def extract_figures(
         images.update((c.name, c.png) for c in figs)
         if printed_text is not None:
             printed_text.update((c.name, c.text) for c in figs if c.text)
+        if chart_images is not None:
+            chart_images.update((c.name, hires[c.name]) for c in figs if c.name in hires)
         out.append(_place(text, figs))
     return "".join(out), images
 

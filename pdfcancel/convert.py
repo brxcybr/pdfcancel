@@ -145,6 +145,7 @@ def convert_single(
     ocr_page_count: int | None = None
     ocr_cleanup = None  # vlm: deferred page-cache removal, run once output is saved
     printed_text: dict[str, str] = {}  # vlm figures: text layer inside each crop
+    chart_images: dict[str, bytes] | None = None  # vlm --full: sharper renders for chart values
 
     if settings.ocr_engine == "vlm":
         # Generic OpenAI-compatible engine: rasterize each page and transcribe
@@ -171,9 +172,12 @@ def convert_single(
         if want_figures:
             from pdfcancel.figures import extract_figures
             from pdfcancel.pages import strip_page_markers
+            if full and settings.vlm_chart_pass:
+                chart_images = {}
             markdown_content, raw_images = extract_figures(
                 pdf_path, markdown_content, dpi=settings.figure_dpi,
-                printed_text=printed_text,
+                printed_text=printed_text, chart_images=chart_images,
+                chart_dpi=settings.chart_dpi,
             )
             console.print(f"    Cropped {len(raw_images)} figure(s) locally")
             if not preserve_pages:
@@ -248,6 +252,7 @@ def convert_single(
                 markdown_content=markdown_content,
                 stop=stop,
                 printed_text=printed_text,
+                chart_images=chart_images,
             )
         except DescriptionsInterrupted as e:
             # Keep finished descriptions so a re-run describes only the rest

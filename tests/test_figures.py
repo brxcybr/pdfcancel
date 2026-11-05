@@ -186,7 +186,8 @@ def test_convert_single_vlm_full_crops_and_describes(pdf, tmp_path, monkeypatch,
     assert (out_dir / "doc_images" / "p001-f01.png").is_file()
     assert "](doc_images/p001-f01.png)" in md
     assert md.count("**Figure description:** A bar chart") == 2
-    assert prompts == [("vision-m", "image/png")] * 2
+    # Each figure: a data pass on the OCR model, then the description.
+    assert sorted(prompts) == [("ocr-m", "image/png")] * 2 + [("vision-m", "image/png")] * 2
     assert ("pdfcancel-page:" in md) is preserve
 
 
@@ -258,9 +259,55 @@ def test_malformed_reply_is_a_per_image_failure(pdf, tmp_path, monkeypatch):
             raise SystemExit("Error: unexpected chat/completions response shape")
         return "ok description"
     monkeypatch.setattr(llm, "chat_vision", flaky)
+    out = convert.convert_single(pdf, _vlm_settings(ocr_concurrency=1, vlm_chart_pass=False),
+                                 output_dir=tmp_path / "o", full=True, extract_images=True)
+    assert out.read_text().count("**Figure description:** ok description") == 1
+
+
+CHART_REPLY = ('Legend: A dark, B light. CHART_JSON: {"figure_type": "pie_chart", '
+               '"series": [{"name": "share", "points": [{"x": "A", "y": 60}, '
+               '{"x": "B", "y": 40}]}], "confidence": "exact"}')
+
+
+def test_chart_pass_values_ground_the_description(pdf, tmp_path, monkeypatch):
+    from pdfcancel import convert, llm
+
+    monkeypatch.setattr(llm, "vlm_ocr_pdf", _fake_vlm_ocr(_ocr_markdown()))
+    seen = []
+
+    def fake_chat(settings, *, image_bytes, prompt, model, **kw):
+        seen.append((model, len(image_bytes), prompt))
+        if model == "ocr-m":
+            return CHART_REPLY
+        return ("A pie chart: A 60%, B 40%.\n\nCHART_JSON:\n"
+                '{"figure_type": "pie_chart", "series": [{"name": "s", "points": '
+                '[{"x": "A", "y": 40}]}]}')
+    monkeypatch.setattr(llm, "chat_vision", fake_chat)
     out = convert.convert_single(pdf, _vlm_settings(ocr_concurrency=1), output_dir=tmp_path / "o",
                                  full=True, extract_images=True)
-    assert out.read_text().count("**Figure description:** ok description") == 1
+    md = out.read_text()
+    data = [s for s in seen if s[0] == "ocr-m"]
+    described = [s for s in seen if s[0] == "vision-m"]
+    assert data and all(d[1] > v[1] for d, v in zip(data, described))  # sharper render
+    assert all('"y": 60' in p for _, _, p in described)  # the describer sees the values
+    assert "| A | 60 |" in md.replace("  ", " ") or "A | 60" in md
+    assert '"y": 40}]}' not in md  # the describer's own guess is replaced
+
+
+def test_non_chart_figures_keep_the_describers_data(pdf, tmp_path, monkeypatch):
+    from pdfcancel import convert, llm
+
+    monkeypatch.setattr(llm, "vlm_ocr_pdf", _fake_vlm_ocr(_ocr_markdown()))
+
+    def fake_chat(settings, *, model, prompt, **kw):
+        if model == "ocr-m":
+            return 'CHART_JSON: {"figure_type": "other"}'
+        assert "ALREADY READ" not in prompt
+        return "A flowchart."
+    monkeypatch.setattr(llm, "chat_vision", fake_chat)
+    out = convert.convert_single(pdf, _vlm_settings(), output_dir=tmp_path / "o",
+                                 full=True, extract_images=True)
+    assert "**Figure description:** A flowchart." in out.read_text()
 
 
 def test_failed_descriptions_are_never_cached(pdf, tmp_path, monkeypatch):
@@ -382,6 +429,36 @@ def test_skips_api_callout_with_monospace_text(tmp_path):
     path = tmp_path / "spec.pdf"
     doc.save(str(path))
     assert figures.detect_figures(pymupdf.open(str(path))[0])[0] == []
+
+
+def test_skips_callout_with_one_long_monospace_line(tmp_path):
+    """A request callout: badge, path, and one sentence of monospace prose."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    p.draw_rect(pymupdf.Rect(72, 200, 540, 330), color=(0.4, 0.5, 0.8), fill=(0.93, 0.95, 1.0))
+    p.draw_rect(pymupdf.Rect(80, 208, 120, 224), fill=(0.2, 0.4, 0.8), color=None)
+    p.insert_text((86, 220), "GET", fontsize=9, color=(1, 1, 1))
+    p.insert_text((130, 220), "/{api-root}/collections/", fontsize=11, fontname="cour")
+    p.insert_text((90, 260), "Implementation Notes", fontsize=11)
+    p.insert_text((100, 285), "Get information about all collections", fontsize=9, fontname="cour")
+    path = tmp_path / "callout.pdf"
+    doc.save(str(path))
+    assert figures.detect_figures(pymupdf.open(str(path))[0])[0] == []
+
+
+def test_crop_takes_in_tick_labels_drawn_as_outlines(tmp_path):
+    """Text exported as glyph paths is too small to cluster but is still a label."""
+    doc = pymupdf.open()
+    p = doc.new_page(width=612, height=792)
+    p.draw_polyline([(200, 400), (260, 330), (320, 360), (380, 280)], color=(0, 0, 0))
+    for y in range(280, 401, 30):  # gridlines
+        p.draw_line((200, y), (400, y), color=(0.8, 0.8, 0.8))
+    for i, y in enumerate(range(400, 279, -30)):  # "0".."4" as 3 pt glyph outlines
+        p.draw_rect(pymupdf.Rect(186, y - 2, 189, y + 2), fill=(0.4, 0.4, 0.4), color=None)
+    path = tmp_path / "outlined.pdf"
+    doc.save(str(path))
+    (crop,) = figures.detect_figures(pymupdf.open(str(path))[0])[0]
+    assert crop.x0 < 186
 
 
 def test_keeps_vector_chart_with_proportional_labels(pdf):

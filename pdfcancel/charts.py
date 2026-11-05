@@ -27,7 +27,7 @@ def chart_prompt_instructions() -> str:
         "section starting with CHART_JSON: on a new line. The section must be "
         "valid JSON only, with this shape:\n"
         "{\n"
-        '  "figure_type": "bar_chart|line_chart|scatter_plot|table|matrix|diagram|other",\n'
+        '  "figure_type": "bar_chart|line_chart|pie_chart|radar_chart|scatter_plot|table|matrix|diagram|other",\n'
         '  "title": "visible or inferred title",\n'
         '  "x_axis": {"label": "", "unit": ""},\n'
         '  "y_axis": {"label": "", "unit": ""},\n'
@@ -43,6 +43,61 @@ def chart_prompt_instructions() -> str:
         "labels. Omit CHART_JSON entirely if there is no extractable "
         "structured data. Do not wrap the JSON in markdown fences."
     )
+
+
+# Data-only pass (vlm engine --full): one request per figure that does nothing
+# but read values, on a sharper render. Asking for the legend swatches before
+# the slices fixes pie charts whose entries differ only in shade, and gridline
+# units recover line charts that print no value scale.
+CHART_DATA_PROMPT = (
+    "Extract the data plotted in this figure. Work carefully, step by step, "
+    "then output the result.\n\n"
+    "1. Identify the figure type (bar, line, pie, radar, scatter, ...). If it "
+    "is not a chart or plot of values (a diagram, photo, screenshot, logo, or "
+    "table of text), answer with only: CHART_JSON: {\"figure_type\": \"other\"}\n"
+    "2. Read the value axis: list the printed tick labels and where they sit. "
+    "If the value axis has no printed scale, measure values in gridlines "
+    "counted up from the baseline (baseline = 0) and give the unit "
+    "\"gridlines\".\n"
+    "3. Read every data point:\n"
+    "   - Bars: where each bar ends against the ticks or gridlines.\n"
+    "   - Lines: the value at every x-axis label, against the ticks or gridlines.\n"
+    "   - Radar: each axis's value against the printed ring labels.\n"
+    "   - Pie or donut: first list each legend entry and its swatch (color, "
+    "shade, or pattern). Then for each slice, report its printed percentage "
+    "and the legend entry whose swatch matches the slice's fill exactly; "
+    "similar shades of gray are different entries, so compare them against "
+    "each other. A slice labelled directly beside it takes that label. Without "
+    "printed percentages, estimate each slice from its angle so they total 100.\n"
+    "4. Prefer printed numbers (data labels) over reading positions.\n\n"
+    "Write your reasoning briefly, then a line CHART_JSON: followed by JSON only:\n"
+    '{"figure_type": "bar_chart|line_chart|pie_chart|radar_chart|scatter_plot|other", '
+    '"title": "", "x_axis": {"label": "", "unit": ""}, "y_axis": {"label": "", '
+    '"unit": ""}, "series": [{"name": "", "points": [{"x": "category or x value", '
+    '"y": 0, "label": ""}]}], "confidence": "exact|estimated|low", "notes": ""}\n'
+    'Use "exact" only when every value is printed in the figure.'
+)
+CHART_TYPES = {"bar_chart", "line_chart", "pie_chart", "radar_chart", "scatter_plot"}
+
+
+def chart_has_data(chart: dict[str, Any] | None) -> bool:
+    """True for a plotted chart with at least one numeric value."""
+    if not chart or chart.get("figure_type") not in CHART_TYPES:
+        return False
+    return any(isinstance(p.get("y"), (int, float))
+               for s in chart.get("series", []) for p in s.get("points", []))
+
+
+def parse_chart_data(reply: str) -> dict[str, Any] | None:
+    """The chart JSON after the last ``CHART_JSON:`` in a data-pass reply."""
+    idx = reply.upper().rfind(CHART_JSON_START)
+    if idx < 0:
+        return None
+    try:
+        raw = json.loads(_extract_json_object(reply[idx + len(CHART_JSON_START):]) or "null")
+    except json.JSONDecodeError:
+        return None
+    return normalize_chart_data(raw) or None
 
 
 def split_chart_json(description: str) -> tuple[str, dict[str, Any] | None]:
