@@ -538,13 +538,17 @@ def indexes():
               help="Inject page markers for page-level citations.")
 @click.option("--no-clean", is_flag=True, help="Skip post-OCR cleanup.")
 @click.option("--plaintext", is_flag=True, help="Output plaintext instead of markdown.")
+@click.option("--images", is_flag=True, help="Extract figures to <name>_images/.")
+@click.option("--full", is_flag=True,
+              help="Extract figures and AI-describe charts, figures, and diagrams.")
+@click.option("--full-model", default=None, help="Vision model for --full descriptions.")
 @click.option("--force", is_flag=True, help="Re-process even if already converted.")
 @click.option("--caffeinate", is_flag=True,
               help="macOS: keep the system awake for the run.")
 def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
             model, ocr_dpi, ocr_concurrency, ocr_retries, ocr_timeout, chunks,
-            chunk_size, chunker, preserve_pages, no_clean, plaintext, force,
-            caffeinate):
+            chunk_size, chunker, preserve_pages, no_clean, plaintext, images,
+            full, full_model, force, caffeinate):
     """Resumably convert every PDF under a directory.
 
     Checkpointed and signal-safe: already-converted files are skipped, each
@@ -561,6 +565,12 @@ def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
         ocr_concurrency=ocr_concurrency, ocr_retries=ocr_retries,
         ocr_timeout=ocr_timeout,
     )
+    if full_model:
+        if settings.ocr_engine == "vlm":
+            settings.vlm_full_model = full_model
+        else:
+            settings.multimodal_model = full_model
+    images = images or full  # --full implies --images, as in the main command
 
     pdf_paths = gather_pdfs(root, exclude=list(exclude) if exclude else None)
     out_ext = ".txt" if plaintext else ".md"
@@ -583,6 +593,7 @@ def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
             try:
                 convert_single(
                     pdf, settings, output_dir=out_dir, plaintext=plaintext,
+                    extract_images=images, full=full,
                     no_clean=no_clean, produce_chunks=chunks,
                     chunk_size=chunk_size, chunker_type=chunker,
                     preserve_pages=preserve_pages, force=force, stop=stop,
