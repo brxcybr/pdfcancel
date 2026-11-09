@@ -195,9 +195,9 @@ def _page_lines(page) -> list[tuple[str, float, bool]]:
     A scan's OCR text layer is drawn invisible (render mode 3) under the page
     image, and its type sizes are estimates, so it gives no evidence.
     """
-    trace = page.get_texttrace()
-    chars = sum(len(sp["chars"]) for sp in trace)
-    if chars and sum(len(sp["chars"]) for sp in trace if sp["type"] == 3) >= chars / 2:
+    from pdfcancel.figures import ocr_text_box
+
+    if ocr_text_box(page) is not None:
         return []
     out = []
     for block in page.get_text("dict")["blocks"]:

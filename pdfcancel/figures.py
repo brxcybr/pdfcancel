@@ -50,6 +50,9 @@ GLYPH_MAX = 20             # pt: a drawn path this small is a label glyph (outli
 PROSE_LINE_CHARS = 25    # mean chars/line of a paragraph block
 TEXTBOX_MIN_CHARS = 100    # text-box test: this much prose ...
 TEXTBOX_MAX_PATHS = 6      # ... inside at most this many drawn marks
+BLANK_INK = 0.005          # a crop with less than this share of inked pixels is empty
+SCAN_IMAGE = 0.5           # in a scanned document, an image this large is a page scan
+SCAN_DOC = 0.5             # ... when at least this share of its pages are scans
 CODE_BOX_MONO = 0.5        # vector region whose text is mostly monospace = code box
 CODE_LINE_CHARS = 30       # ... with a monospace line this long (code, not a node label)
 MONO_FONT_RE = re.compile(r"mono|courier|consol|menlo|code|typewriter", re.IGNORECASE)
@@ -95,6 +98,32 @@ def _visible(d: dict) -> bool:
     return any(c is not None and min(c, default=1.0) < INVISIBLE_MIN for c in colors)
 
 
+def ocr_text_box(page):
+    """Bounds of the page's invisible OCR text layer, or ``None``.
+
+    A scan carries its OCR text drawn invisibly (render mode 3) over the
+    page image; such a page is a scan even when the image has margins.
+    """
+    pymupdf = _pymupdf()
+    trace = page.get_texttrace()
+    total = sum(len(sp["chars"]) for sp in trace)
+    hidden = [sp for sp in trace if sp["type"] == 3]
+    if not total or sum(len(sp["chars"]) for sp in hidden) < total / 2:
+        return None
+    box = pymupdf.Rect(hidden[0]["bbox"])
+    for sp in hidden[1:]:
+        box |= sp["bbox"]
+    return box
+
+
+def _blank(page, r) -> bool:
+    """True when ``r`` renders as (nearly) empty paper."""
+    pymupdf = _pymupdf()
+    pix = page.get_pixmap(dpi=36, clip=r, colorspace=pymupdf.csGRAY, alpha=False)
+    n = pix.width * pix.height
+    return n == 0 or sum(1 for v in pix.samples if v < 200) < BLANK_INK * n
+
+
 def _has_listing(lines: list, *, margin: float = 2.5) -> bool:
     """True when two or more lines stack at one left margin, line after line."""
     lines = sorted(lines, key=lambda r: (r.y0, r.x0))
@@ -107,8 +136,24 @@ def _has_listing(lines: list, *, margin: float = 2.5) -> bool:
     return False
 
 
-def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
-    """Return ``(figure rects in reading order, page_is_scanned)`` for a page."""
+def scanned_document(doc) -> bool:
+    """True when most pages are scans: a page-filling image, an invisible OCR
+    layer, or a large image with no text layer at all."""
+    def scan(page) -> bool:
+        area = page.rect.get_area()
+        sizes = [(page.rect & i["bbox"]).get_area() / area for i in page.get_image_info()]
+        return (any(s >= FULL_PAGE for s in sizes) or ocr_text_box(page) is not None
+                or (not page.get_text("text").strip() and any(s >= SCAN_IMAGE for s in sizes)))
+    return len(doc) > 0 and sum(map(scan, doc)) >= SCAN_DOC * len(doc)
+
+
+def detect_figures(page, *, include_tables: bool = False,
+                   scan_doc: bool = False) -> tuple[list, bool]:
+    """Return ``(figure rects in reading order, page_is_scanned)`` for a page.
+
+    ``scan_doc`` (see :func:`scanned_document`) marks a scanned document, whose
+    page images are scans even with wide margins.
+    """
     pymupdf = _pymupdf()
     pr = page.rect
     top, bottom = HEADER_ZONE * pr.height, (1 - HEADER_ZONE) * pr.height
@@ -123,10 +168,14 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
     # chart is often several small raster tiles plus vector-outlined labels,
     # none of which qualifies on its own.
     images = [pymupdf.Rect(i["bbox"]) & pr for i in page.get_image_info()]
+    hidden = ocr_text_box(page)
     parts = []
     for r in images:
-        if r.get_area() >= FULL_PAGE * page_area:
-            scanned = True
+        if r.get_area() >= FULL_PAGE * page_area or (
+                hidden is not None
+                and (r & hidden).get_area() >= 0.5 * min(r.get_area(), hidden.get_area())) or (
+                scan_doc and r.get_area() >= SCAN_IMAGE * page_area):
+            scanned = True  # the page image, even with margins
         elif not r.is_empty:
             parts.append(r)
 
@@ -174,13 +223,17 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
     def is_text_box(r) -> bool:
         if any((r & i).get_area() >= 0.2 * r.get_area() for i in images):
             return False
-        texts = [t for lr, t, _ in lines if t and lr in r]
+        # A line counts when mostly inside: text often runs past its box.
+        held = [(lr, t) for lr, t, _ in lines if t and (lr & r).get_area() >= 0.5 * lr.get_area()]
+        texts = [t for _, t in held]
         chars = sum(map(len, texts))
         long_chars = sum(len(t) for t in texts if len(t) >= 40)
         if chars < TEXTBOX_MIN_CHARS or long_chars < 0.4 * chars:
             return False
+        # Frames around text (cards, callouts) are not marks; bars and points hold none.
         marks = [p for p in paths if p in r and p.width < 0.6 * r.width
-                 and min(p.width, p.height) > 1]
+                 and min(p.width, p.height) > 1
+                 and not any((lr & p).get_area() >= 0.5 * lr.get_area() for lr, _ in held)]
         return len(marks) <= TEXTBOX_MAX_PATHS
 
     # Spec/API documents draw request, header, and JSON callouts as vector
@@ -210,6 +263,10 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
                 if n and m >= CODE_BOX_MONO * n:
                     mono_lines.append(lr)
                     long_line = long_line or m >= CODE_LINE_CHARS
+        if 0 < chars < 20 and mono == chars and all(
+                min(p.width, p.height) <= 1.5 or p.width >= 0.8 * r.width
+                for p in paths if p in r):
+            return True  # the tail of a code box split across pages: a frame and a bracket
         if chars < 20 or mono < CODE_BOX_MONO * chars:
             return False
         return long_line or _has_listing(mono_lines)
@@ -245,6 +302,7 @@ def detect_figures(page, *, include_tables: bool = False) -> tuple[list, bool]:
             for lr in grow:
                 r.include_rect(lr)
     rects = _merge([(r + (-4, -4, 4, 4)) & pr for r in _merge(rects)])
+    rects = [r for r in rects if not _blank(page, r)]
 
     # Reading order: left column, then right; full-width figures sort as left.
     return sorted(rects, key=lambda r: (1 if r.x0 >= 0.45 * pr.width else 0, r.y0)), scanned
@@ -289,6 +347,7 @@ def extract_figures(
         raise ValueError("extract_figures needs page-marked markdown")
 
     doc = pymupdf.open(str(pdf_path))
+    scan_doc = scanned_document(doc)
     sections = _split_pages(markdown)
     placeholders = {n: len(PLACEHOLDER_RE.findall(t)) for n, t in sections if n}
 
@@ -299,7 +358,7 @@ def extract_figures(
     try:
         for page in doc:
             n = page.number + 1
-            rects, scanned = detect_figures(page, include_tables=include_tables)
+            rects, scanned = detect_figures(page, include_tables=include_tables, scan_doc=scan_doc)
             crops[n] = [
                 _Crop(f"p{n:03d}-f{k:02d}.png", page.get_pixmap(dpi=dpi, clip=r).tobytes("png"),
                       *_crop_info(page, r), _printed(page, r))
