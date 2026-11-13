@@ -291,14 +291,14 @@ def chat_vision(
             *(history or []),
         ],
         "temperature": 0.1,
-        "max_tokens": max_tokens,
+        settings.vlm_token_param: max_tokens,
     }
     url = f"{base}/v1/chat/completions"
 
     own_client = http_client is None
     client = http_client or settings.build_vision_http_client()
     try:
-        if stop_when is not None:
+        if stop_when is not None and settings.vlm_stream:
             return with_retry(
                 lambda: _stream(client, url, {**payload, "stream": True},
                                 _auth_headers(settings), stop_when,

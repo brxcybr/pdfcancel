@@ -96,6 +96,20 @@ class Settings:
     vlm_full_model: str = field(
         default_factory=lambda: os.getenv("PDFCANCEL_VLM_FULL_MODEL", "").strip()
     )
+    # Name of the reply-length cap in vlm requests. OpenAI reasoning models
+    # (GPT-5.x, o-series, e.g. via Ask Sage) reject max_tokens and need
+    # max_completion_tokens; vLLM, LiteLLM, and Ollama take max_tokens.
+    vlm_token_param: str = field(
+        default_factory=lambda: (
+            os.getenv("PDFCANCEL_VLM_TOKEN_PARAM", "max_tokens").strip() or "max_tokens"
+        )
+    )
+    # Stream page transcriptions so a repetition loop is cut off early. Turn
+    # off for gateways that drop streamed replies to image requests (Ask Sage);
+    # loops are still caught on the finished text, at the cost of more tokens.
+    vlm_stream: bool = field(
+        default_factory=lambda: _bool_env("PDFCANCEL_VLM_STREAM", True)
+    )
     figure_dpi: int = field(default_factory=lambda: _int_env("PDFCANCEL_FIGURE_DPI", 200))
     # vlm engine --full: a data-only pass reads chart values from a sharper
     # render (chart_dpi) with chart_model (defaults to vlm_model, the OCR

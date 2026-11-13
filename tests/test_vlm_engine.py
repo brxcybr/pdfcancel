@@ -159,6 +159,34 @@ def test_chat_vision_uses_api_key(monkeypatch):
     assert captured["headers"]["Authorization"] == "Bearer sekret"
 
 
+def test_chat_vision_token_param_defaults_to_max_tokens(monkeypatch):
+    settings = Settings(api_base="https://h/v1", ocr_engine="vlm")
+    captured: dict = {}
+    monkeypatch.setattr(
+        settings,
+        "build_vision_http_client",
+        lambda: _FakeClient({"choices": [{"message": {"content": "x"}}]}, captured),
+    )
+    llm.chat_vision(settings, image_bytes=b"z", prompt="p", model="m", max_tokens=99)
+    assert captured["json"]["max_tokens"] == 99
+    assert "max_completion_tokens" not in captured["json"]
+
+
+def test_chat_vision_token_param_from_env(monkeypatch):
+    # OpenAI reasoning models (e.g. GPT-5.x via Ask Sage) reject max_tokens.
+    monkeypatch.setenv("PDFCANCEL_VLM_TOKEN_PARAM", "max_completion_tokens")
+    settings = Settings(api_base="https://h/v1", ocr_engine="vlm")
+    captured: dict = {}
+    monkeypatch.setattr(
+        settings,
+        "build_vision_http_client",
+        lambda: _FakeClient({"choices": [{"message": {"content": "x"}}]}, captured),
+    )
+    llm.chat_vision(settings, image_bytes=b"z", prompt="p", model="m", max_tokens=99)
+    assert captured["json"]["max_completion_tokens"] == 99
+    assert "max_tokens" not in captured["json"]
+
+
 def test_chat_vision_content_as_parts_list(monkeypatch):
     settings = Settings(api_base="https://h/v1", ocr_engine="vlm")
     payload = {"choices": [{"message": {"content": [{"text": "a"}, {"text": "b"}]}}]}
@@ -297,6 +325,18 @@ def test_streamed_reply_runs_to_the_end_and_tolerates_plain_json(monkeypatch):
                           http_client=_sse_client([], {}, "application/json"),
                           stop_when=lambda t: False)
     assert out == "plain"  # a server that ignores "stream"
+
+
+def test_stream_off_sends_a_plain_request(monkeypatch):
+    # Ask Sage drops streamed replies to image requests.
+    monkeypatch.setenv("PDFCANCEL_VLM_STREAM", "0")
+    settings = Settings(api_base="https://h/v1", ocr_engine="vlm")
+    seen: dict = {}
+    out = llm.chat_vision(settings, image_bytes=b"z", prompt="p", model="m",
+                          http_client=_sse_client([], seen, "application/json"),
+                          stop_when=lambda t: False)
+    assert "stream" not in seen["body"]
+    assert out == "plain"
 
 
 def test_a_stream_that_never_finishes_times_out():
