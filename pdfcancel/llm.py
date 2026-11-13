@@ -291,14 +291,14 @@ def chat_vision(
             *(history or []),
         ],
         "temperature": 0.1,
-        "max_tokens": max_tokens,
+        settings.vlm_token_param: max_tokens,
     }
     url = f"{base}/v1/chat/completions"
 
     own_client = http_client is None
     client = http_client or settings.build_vision_http_client()
     try:
-        if stop_when is not None:
+        if stop_when is not None and settings.vlm_stream:
             return with_retry(
                 lambda: _stream(client, url, {**payload, "stream": True},
                                 _auth_headers(settings), stop_when,
@@ -458,8 +458,12 @@ def vlm_ocr_pdf(
     cache_dir: Path | None = None,
     stop: Event | None = None,
     keep_cache: bool = False,
+    stem: str | None = None,
 ) -> OcrResult:
     """OCR a PDF with the vlm engine: rasterize pages, transcribe, assemble.
+
+    ``stem`` names the page cache (default: the PDF's stem); a batch passes
+    the PDF's output name so same-named PDFs don't share one cache.
 
     Resumable and fail-safe for long runs:
 
@@ -511,7 +515,7 @@ def vlm_ocr_pdf(
             "text_layer": bool(settings.vlm_text_layer),
             "page_count": n,
         }
-        cache = PageCache(cache_dir, stem=pdf_path.stem, meta=meta)
+        cache = PageCache(cache_dir, stem=stem or pdf_path.stem, meta=meta)
         cache.validate_or_reset()
         for i in range(n):
             cached = cache.load_page(i)

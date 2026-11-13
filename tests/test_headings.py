@@ -47,6 +47,25 @@ def test_numbered_lists_and_body_lines_stay_put():
     assert "1. Install the tool" in out and "7. Unrelated numbered line" in out
 
 
+def test_numbered_titles_run_into_their_paragraph_are_promoted():
+    # A model sometimes sets a section title directly above its text (Alaeifar 2024).
+    body = "It is the ability to trace the originator of a particular piece of information."
+    md = (f"## 3. Requirements\n\nText.\n\n### 3.4. Timeliness\n{body}\n\n"
+          f"3.5. Traceability\n{body}\n\n3.6. Network bandwidth\n{body}\n\n## 4. Platforms\n\nText.")
+    assert _heads(normalize_headings(md)) == [
+        "## 3. Requirements", "### 3.4. Timeliness", "### 3.5. Traceability",
+        "### 3.6. Network bandwidth", "## 4. Platforms"]
+
+
+def test_contents_entries_and_short_lines_below_stay_put():
+    md = ("## 1. Introduction\n\nText.\n\n## 2. Methods\n\nText.\n\n## 3. Results\n\n"
+          "Figures\n\n3.1 A map for theorising and researching intelligence 87\n"
+          "3.2 Information continuum and the Seven Tribes 132\n\n"
+          "3.1 Scope\nShort line here.\n\n## 4. End\n\nText.")
+    assert _heads(normalize_headings(md)) == [
+        "## 1. Introduction", "## 2. Methods", "## 3. Results", "## 4. End"]
+
+
 def test_unnumbered_documents_are_untouched():
     md = "# Report\n\n### Findings\n\nText.\n\n# Annex\n\nMore."
     assert normalize_headings(md) == md

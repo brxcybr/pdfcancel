@@ -93,6 +93,40 @@ def gather_pdfs(path: Path, *, exclude: list[str] | None = None) -> list[Path]:
     raise SystemExit(f"Error: {path} does not exist.")
 
 
+def output_stems(pdf_paths: list[Path]) -> dict[Path, str]:
+    """Output name (stem) for each PDF, unique within one output folder.
+
+    Outputs are named by file stem, so two different PDFs with the same name
+    in different folders would overwrite each other. The first of each name
+    (in input order) keeps it, and a byte-identical copy shares it (it is
+    then skipped as unchanged). Any other gets its folder name appended, or a
+    hash prefix when that is taken too.
+    """
+    by_stem: dict[str, list[Path]] = {}
+    for pdf in pdf_paths:
+        by_stem.setdefault(pdf.stem, []).append(pdf)
+    stems: dict[Path, str] = {}
+    taken = set(by_stem)
+    for stem, paths in by_stem.items():
+        stems[paths[0]] = stem
+        if len(paths) == 1:
+            continue
+        first = file_hash(paths[0])
+        for pdf in paths[1:]:
+            digest = file_hash(pdf)
+            if digest == first:
+                stems[pdf] = stem
+                continue
+            name = f"{stem} ({pdf.parent.name})"
+            if name in taken:
+                name = f"{stem} ({digest[:8]})"
+            taken.add(name)
+            stems[pdf] = name
+            console.print(f"  [yellow]{pdf.name} shares its name with another PDF; "
+                          f"writing it as {name!r}[/yellow]")
+    return stems
+
+
 def convert_single(
     pdf_path: Path,
     settings: Settings,
@@ -109,8 +143,12 @@ def convert_single(
     chunker_type: str = "recursive",
     preserve_pages: bool = False,
     stop: Event | None = None,
+    output_stem: str | None = None,
 ) -> Path:
     """Convert a single PDF to markdown (or plaintext).
+
+    ``output_stem`` names the outputs and manifest entry (default: the PDF's
+    stem); batches pass the name from :func:`output_stems`.
 
     Returns the path to the output file.
 
@@ -127,7 +165,7 @@ def convert_single(
     # Check manifest for skip-processing
     manifest = load_manifest(output_dir)
     pdf_hash = file_hash(pdf_path)
-    stem = pdf_path.stem
+    stem = output_stem or pdf_path.stem
 
     if not force and stem in manifest and manifest[stem].get("hash") == pdf_hash:
         out_ext = ".txt" if plaintext else ".md"
@@ -167,6 +205,7 @@ def convert_single(
             # fail or be interrupted; keep the paid-for page transcriptions
             # until the output is written.
             keep_cache=want_figures,
+            stem=stem,
         )
         markdown_content = ocr_result.markdown
         raw_images = ocr_result.images
@@ -342,6 +381,7 @@ def convert_batch(
     results: list[tuple[Path, Path | None]] = []
     total = len(pdf_paths)
     failed = 0
+    stems = output_stems(pdf_paths)
 
     for idx, pdf_path in enumerate(pdf_paths, 1):
         if stop is not None and stop.is_set():
@@ -366,6 +406,7 @@ def convert_batch(
                 chunker_type=chunker_type,
                 preserve_pages=preserve_pages,
                 stop=stop,
+                output_stem=stems[pdf_path],
             )
             results.append((pdf_path, out))
             if verbose:
@@ -428,11 +469,12 @@ def convert_batch_pipeline(
 
     # Filter already-processed PDFs unless --force
     manifest = load_manifest(output_dir)
+    stems = output_stems(pdf_paths)
     to_process = []
     skipped: list[tuple[Path, Path | None]] = []
     for pdf_path in pdf_paths:
         pdf_hash = file_hash(pdf_path)
-        stem = pdf_path.stem
+        stem = stems[pdf_path]
         out_ext = ".txt" if plaintext else ".md"
         existing = output_dir / f"{stem}{out_ext}"
         if (
@@ -472,7 +514,7 @@ def convert_batch_pipeline(
 
     if full:
         for result in ocr_results:
-            stem = result.pdf_path.stem
+            stem = stems[result.pdf_path]
             cached = manifest.get(stem, {}).get("image_descriptions", {})
             requests, cached_hits = build_batch_vision_requests(
                 result.images,
@@ -502,7 +544,7 @@ def convert_batch_pipeline(
 
     for idx, result in enumerate(ocr_results, 1):
         pdf_path = result.pdf_path
-        stem = pdf_path.stem
+        stem = stems[pdf_path]
         markdown_content = result.markdown
         raw_images = result.images
 

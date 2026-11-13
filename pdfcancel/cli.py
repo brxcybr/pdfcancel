@@ -26,6 +26,7 @@ from pdfcancel.convert import (
     convert_batch_pipeline,
     convert_single,
     gather_pdfs,
+    output_stems,
 )
 from pdfcancel.errors import ConversionIncomplete
 from pdfcancel.runstate import RUN_STATE_NAME, RunState, stop_on_signals
@@ -576,6 +577,8 @@ def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
     out_ext = ".txt" if plaintext else ".md"
     state = RunState(root / RUN_STATE_NAME, total=len(pdf_paths))
     console.print(f"[bold]Backlog:[/bold] {len(pdf_paths)} PDF(s) under {root}")
+    # One shared output folder: same-named PDFs need distinct output names.
+    stems = output_stems(pdf_paths) if output_dir else {p: p.stem for p in pdf_paths}
 
     interrupted = False
     with stop_on_signals() as stop:
@@ -584,7 +587,7 @@ def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
                 interrupted = True
                 break
             out_dir = Path(output_dir) if output_dir else pdf.parent
-            existing = out_dir / f"{pdf.stem}{out_ext}"
+            existing = out_dir / f"{stems[pdf]}{out_ext}"
             if not force and existing.exists():
                 state.record(pdf.name, "skipped")
                 continue
@@ -597,6 +600,7 @@ def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
                     no_clean=no_clean, produce_chunks=chunks,
                     chunk_size=chunk_size, chunker_type=chunker,
                     preserve_pages=preserve_pages, force=force, stop=stop,
+                    output_stem=stems[pdf],
                 )
                 state.record(pdf.name, "done")
             except ConversionIncomplete as e:

@@ -1,0 +1,657 @@
+{
+ "alaeifar": [
+  {
+   "text": "1. Introduction",
+   "depth": 1
+  },
+  {
+   "text": "1.1. Significance of CTI sharing",
+   "depth": 2
+  },
+  {
+   "text": "1.2. Existing surveys on CTI sharing and our contributions",
+   "depth": 2
+  },
+  {
+   "text": "1.3. Paper organization and roadmap",
+   "depth": 2
+  },
+  {
+   "text": "2. Cyber threat intelligence sharing",
+   "depth": 1
+  },
+  {
+   "text": "2.1. What is CTI?",
+   "depth": 2
+  },
+  {
+   "text": "2.2. CTI life-cycle",
+   "depth": 2
+  },
+  {
+   "text": "2.3. CTI sources",
+   "depth": 2
+  },
+  {
+   "text": "2.4. CTI producers and consumers",
+   "depth": 2
+  },
+  {
+   "text": "2.5. Use of CTI",
+   "depth": 2
+  },
+  {
+   "text": "2.6. What is CTI sharing?",
+   "depth": 2
+  },
+  {
+   "text": "2.7. Classifications of CTI sharing architectures",
+   "depth": 2
+  },
+  {
+   "text": "2.7.1. Centralized",
+   "depth": 3
+  },
+  {
+   "text": "2.7.2. Decentralized",
+   "depth": 3
+  },
+  {
+   "text": "2.7.3. Distributed",
+   "depth": 3
+  },
+  {
+   "text": "2.8. Standards of CTI sharing",
+   "depth": 2
+  },
+  {
+   "text": "2.9. Commercial platforms for CTI sharing",
+   "depth": 2
+  },
+  {
+   "text": "3. Challenges of CTI sharing",
+   "depth": 1
+  },
+  {
+   "text": "3.1. Collaboration",
+   "depth": 2
+  },
+  {
+   "text": "3.2. Scalability",
+   "depth": 2
+  },
+  {
+   "text": "3.3. Automation",
+   "depth": 2
+  },
+  {
+   "text": "3.4. Timeliness",
+   "depth": 2
+  },
+  {
+   "text": "3.5. Traceability",
+   "depth": 2
+  },
+  {
+   "text": "3.6. Network bandwidth",
+   "depth": 2
+  },
+  {
+   "text": "3.7. Trust",
+   "depth": 2
+  },
+  {
+   "text": "3.8. Privacy",
+   "depth": 2
+  },
+  {
+   "text": "3.9. Integrity",
+   "depth": 2
+  },
+  {
+   "text": "3.10. Standardization",
+   "depth": 2
+  },
+  {
+   "text": "3.11. Security",
+   "depth": 2
+  },
+  {
+   "text": "3.12. Intelligent intelligence",
+   "depth": 2
+  },
+  {
+   "text": "3.13. Interoperability",
+   "depth": 2
+  },
+  {
+   "text": "3.14. Integration",
+   "depth": 2
+  },
+  {
+   "text": "3.15. Anonymity",
+   "depth": 2
+  },
+  {
+   "text": "3.16. Heterogeneity",
+   "depth": 2
+  },
+  {
+   "text": "4. Current approaches of CTI sharing",
+   "depth": 1
+  },
+  {
+   "text": "4.1. Blockchain integration",
+   "depth": 2
+  },
+  {
+   "text": "4.2. Use of incentives",
+   "depth": 2
+  },
+  {
+   "text": "4.3. Machine learning",
+   "depth": 2
+  },
+  {
+   "text": "4.4. Collaborative sharing",
+   "depth": 2
+  },
+  {
+   "text": "4.5. Use of advanced computing platforms",
+   "depth": 2
+  },
+  {
+   "text": "4.6. Hybrid models",
+   "depth": 2
+  },
+  {
+   "text": "4.7. Summary of findings",
+   "depth": 2
+  }
+ ],
+ "barrios": [
+  {
+   "text": "1. Introduction",
+   "depth": 1
+  },
+  {
+   "text": "2. Unified AI-Enhanced CTI Conceptual Architecture",
+   "depth": 1
+  },
+  {
+   "text": "2.1. Conceptual Overview and Design Rationale",
+   "depth": 2
+  },
+  {
+   "text": "2.2. Core Architectural Layers of AI-Enhanced CTI",
+   "depth": 2
+  },
+  {
+   "text": "2.3. Unified AI-Enhanced CTI Reference Architecture",
+   "depth": 2
+  },
+  {
+   "text": "2.4. Functional Capabilities of CTI Systems",
+   "depth": 2
+  },
+  {
+   "text": "2.5. Reference Architecture and Deployment Model",
+   "depth": 2
+  },
+  {
+   "text": "3. The Role of AI in CTI",
+   "depth": 1
+  },
+  {
+   "text": "3.1. Machine Learning for Indicator Classification and Enrichment",
+   "depth": 2
+  },
+  {
+   "text": "3.2. Natural Language Processing for Threat Intelligence Extraction",
+   "depth": 2
+  },
+  {
+   "text": "3.3. Graph-Based Learning for Correlation and Attribution",
+   "depth": 2
+  },
+  {
+   "text": "3.4. Predictive Analytics and Threat Forecasting",
+   "depth": 2
+  },
+  {
+   "text": "3.5. AI-Assisted Decision Support and Response",
+   "depth": 2
+  },
+  {
+   "text": "3.6. Operational Definition of Predictive CTI",
+   "depth": 2
+  },
+  {
+   "text": "4. CTI Platforms and Tools with AI Capabilities",
+   "depth": 1
+  },
+  {
+   "text": "4.1. Platform Evaluation Methodology",
+   "depth": 2
+  },
+  {
+   "text": "4.2. Functional and Non-Functional Evaluation Criteria",
+   "depth": 2
+  },
+  {
+   "text": "4.3. Comparative Analysis of Open-Source and Commercial CTI Platforms",
+   "depth": 2
+  },
+  {
+   "text": "4.4. Discussion and Platform Selection Considerations",
+   "depth": 2
+  }
+ ],
+ "cascavilla": [
+  {
+   "text": "1. Introduction",
+   "depth": 1
+  },
+  {
+   "text": "1.1. Vision and scope",
+   "depth": 2
+  },
+  {
+   "text": "1.2. Approach and major contributions",
+   "depth": 2
+  },
+  {
+   "text": "2. Background and related work",
+   "depth": 1
+  },
+  {
+   "text": "2.1. Related surveys",
+   "depth": 2
+  },
+  {
+   "text": "3. Research materials and methods",
+   "depth": 1
+  },
+  {
+   "text": "3.1. Research problem, questions and motivations",
+   "depth": 2
+  },
+  {
+   "text": "3.2. Sample selection and control factors",
+   "depth": 2
+  },
+  {
+   "text": "3.3. Data analysis",
+   "depth": 2
+  },
+  {
+   "text": "4. Results",
+   "depth": 1
+  },
+  {
+   "text": "4.1. Data set descriptive statistics",
+   "depth": 2
+  },
+  {
+   "text": "4.2. Cybercrime threat intelligence: a surface-web",
+   "depth": 2
+  },
+  {
+   "text": "4.2.1. Assessment methods (METH)",
+   "depth": 3
+  },
+  {
+   "text": "4.2.2. Countermeasures (CMEASURE)",
+   "depth": 3
+  },
+  {
+   "text": "4.2.3. Anonymous crawling policies (ACP)",
+   "depth": 3
+  },
+  {
+   "text": "4.2.4. Risk-level parameters (SRLP)",
+   "depth": 3
+  },
+  {
+   "text": "4.2.5. Software quality parameters (SQUAL)",
+   "depth": 3
+  },
+  {
+   "text": "4.2.6. Website-appearance parameters (WSAP)",
+   "depth": 3
+  },
+  {
+   "text": "4.2.7. Criminal activity types (CTYPE)",
+   "depth": 3
+  },
+  {
+   "text": "4.3. Cybercrime threat intelligence: a taxonomy for deep-",
+   "depth": 2
+  },
+  {
+   "text": "4.3.1. Assessment methods (METH)",
+   "depth": 3
+  },
+  {
+   "text": "4.3.2. Anonymous crawling policies (ACP)",
+   "depth": 3
+  },
+  {
+   "text": "4.3.3. Risk-level parameters (SRLP)",
+   "depth": 3
+  },
+  {
+   "text": "4.3.4. Software quality parameters (SQUAL)",
+   "depth": 3
+  },
+  {
+   "text": "4.3.5. Website-appearance parameters (WSAP)",
+   "depth": 3
+  },
+  {
+   "text": "4.4. Cybercrime threat indicators: topic modelling results",
+   "depth": 2
+  },
+  {
+   "text": "4.4.1. Topic modelling results for surface web",
+   "depth": 3
+  },
+  {
+   "text": "4.4.2. Topic modelling results for dark and deep web",
+   "depth": 3
+  },
+  {
+   "text": "4.4.3. Qualitative vs. quantitative insights: overlap and con-",
+   "depth": 3
+  },
+  {
+   "text": "5. Discussion",
+   "depth": 1
+  },
+  {
+   "text": "5.1. What online depth levels are assessed, and to what",
+   "depth": 2
+  },
+  {
+   "text": "5.2. What degrees of anonymity exist for web-crawling?",
+   "depth": 2
+  },
+  {
+   "text": "5.3. What website features are most indicative of cyber",
+   "depth": 2
+  },
+  {
+   "text": "5.4. What risk assessment techniques exist?",
+   "depth": 2
+  },
+  {
+   "text": "5.5. Findings relevance and concrete recommendations",
+   "depth": 2
+  },
+  {
+   "text": "6. Research roadmap",
+   "depth": 1
+  },
+  {
+   "text": "6.1. Recap and conclusion",
+   "depth": 2
+  },
+  {
+   "text": "6.2. The road ahead",
+   "depth": 2
+  }
+ ],
+ "chi-report": [],
+ "mavroeidis-scan": [
+  {
+   "text": "I. INTRODUCTION",
+   "depth": 1
+  },
+  {
+   "text": "II. METHODOLOGY",
+   "depth": 1
+  },
+  {
+   "text": "A. The Detection Maturity Level Model - DML",
+   "depth": 2
+  },
+  {
+   "text": "B. The Cyber Threat Intelligence Model",
+   "depth": 2
+  },
+  {
+   "text": "C. Evaluation Criteria",
+   "depth": 2
+  },
+  {
+   "text": "III. TAXONOMIES AND SHARING STANDARDS",
+   "depth": 1
+  },
+  {
+   "text": "A. Enumerations",
+   "depth": 2
+  },
+  {
+   "text": "B. Scoring Systems",
+   "depth": 2
+  },
+  {
+   "text": "C. Sharing Standards",
+   "depth": 2
+  },
+  {
+   "text": "IV. ONTOLOGIES",
+   "depth": 1
+  },
+  {
+   "text": "V. DISCUSSION",
+   "depth": 1
+  },
+  {
+   "text": "VI. CONCLUSION",
+   "depth": 1
+  }
+ ],
+ "mavroeidis": [
+  {
+   "text": "I. INTRODUCTION",
+   "depth": 1
+  },
+  {
+   "text": "II. METHODOLOGY",
+   "depth": 1
+  },
+  {
+   "text": "A. The Detection Maturity Level Model - DML",
+   "depth": 2
+  },
+  {
+   "text": "B. The Cyber Threat Intelligence Model",
+   "depth": 2
+  },
+  {
+   "text": "C. Evaluation Criteria",
+   "depth": 2
+  },
+  {
+   "text": "III. TAXONOMIES AND SHARING STANDARDS",
+   "depth": 1
+  },
+  {
+   "text": "A. Enumerations",
+   "depth": 2
+  },
+  {
+   "text": "B. Scoring Systems",
+   "depth": 2
+  },
+  {
+   "text": "C. Sharing Standards",
+   "depth": 2
+  },
+  {
+   "text": "IV. ONTOLOGIES",
+   "depth": 1
+  },
+  {
+   "text": "V. DISCUSSION",
+   "depth": 1
+  },
+  {
+   "text": "VI. CONCLUSION",
+   "depth": 1
+  }
+ ],
+ "taxii-spec": [
+  {
+   "text": "3.3 Sorting",
+   "depth": 2
+  },
+  {
+   "text": "3.4 Filtering",
+   "depth": 2
+  },
+  {
+   "text": "3.4.1 Supported Fields for Match",
+   "depth": 3
+  },
+  {
+   "text": "3.5 Pagination",
+   "depth": 2
+  },
+  {
+   "text": "3.6 Errors",
+   "depth": 2
+  },
+  {
+   "text": "3.6.1 Error Message",
+   "depth": 3
+  },
+  {
+   "text": "3.7 Envelope Resource",
+   "depth": 2
+  },
+  {
+   "text": "3.8 Property Names",
+   "depth": 2
+  },
+  {
+   "text": "3.9 DNS SRV Names",
+   "depth": 2
+  },
+  {
+   "text": "4 TAXII API - Server Information",
+   "depth": 1
+  },
+  {
+   "text": "4.1 Server Discovery",
+   "depth": 2
+  },
+  {
+   "text": "4.1.1 Discovery Resource",
+   "depth": 3
+  },
+  {
+   "text": "4.2 Get API Root Information",
+   "depth": 2
+  },
+  {
+   "text": "4.2.1 API Root Resource",
+   "depth": 3
+  },
+  {
+   "text": "4.3 Get Status",
+   "depth": 2
+  },
+  {
+   "text": "4.3.1 Status Resource",
+   "depth": 3
+  },
+  {
+   "text": "5 TAXII API - Collections",
+   "depth": 1
+  },
+  {
+   "text": "5.1 Get Collections",
+   "depth": 2
+  }
+ ],
+ "zibak": [
+  {
+   "text": "1 INTRODUCTION",
+   "depth": 1
+  },
+  {
+   "text": "2 BACKGROUND AND RELATED WORK",
+   "depth": 1
+  },
+  {
+   "text": "2.1 Threat Intelligence Sharing",
+   "depth": 2
+  },
+  {
+   "text": "2.2 Data Quality Research",
+   "depth": 2
+  },
+  {
+   "text": "2.3 Quality in Threat Intelligence",
+   "depth": 2
+  },
+  {
+   "text": "3 APPLIED RESEARCH METHODOLOGY",
+   "depth": 1
+  },
+  {
+   "text": "3.1 Part 1: Systematic Literature Review",
+   "depth": 2
+  },
+  {
+   "text": "3.2 Part 2: Modified Delphi Study",
+   "depth": 2
+  },
+  {
+   "text": "4 DEFINING THREAT DATA, INFORMATION, AND INTELLIGENCE",
+   "depth": 1
+  },
+  {
+   "text": "4.1 Threat Data",
+   "depth": 2
+  },
+  {
+   "text": "4.2 Threat Information",
+   "depth": 2
+  },
+  {
+   "text": "4.3 Threat Intelligence",
+   "depth": 2
+  },
+  {
+   "text": "5 IDENTIFYING THREAT INTELLIGENCE QUALITY DIMENSIONS",
+   "depth": 1
+  },
+  {
+   "text": "5.1 Results of the Systematic Literature Review",
+   "depth": 2
+  },
+  {
+   "text": "5.2 Results of Delphi Round 1",
+   "depth": 2
+  },
+  {
+   "text": "5.2.1 Dropping the Uniqueness and Completeness Dimensions: After careful examination of the proposed",
+   "depth": 3
+  },
+  {
+   "text": "5.2.2 Adding the Actionability and Provenance Dimensions. When asked about what quality dimensions are",
+   "depth": 3
+  },
+  {
+   "text": "5.3 Results of Delphi Round 2",
+   "depth": 2
+  },
+  {
+   "text": "6 THREAT INTELLIGENCE QUALITY DIMENSIONS",
+   "depth": 1
+  }
+ ]
+}
