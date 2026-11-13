@@ -1,0 +1,5 @@
+# Benchmark data stays local: the corpus is copyrighted papers, and truth/ and
+# out/ hold their text. scripts/prepare.py rebuilds the corpus and truth.
+corpus/
+out/
+truth/*.txt
