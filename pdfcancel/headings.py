@@ -8,7 +8,8 @@ section heading as a plain line (``2.1. Related surveys``, ``II. METHODOLOGY``).
 - gives every numbered heading the level its depth implies (``1.`` → ``##``,
   ``1.1`` → ``###``; IEEE ``II.`` → ``##`` and ``B.`` → ``###``);
 - promotes a plain standalone line to a heading only when its number is a
-  plausible next section (so a numbered list in the body is left alone);
+  plausible next section (so a numbered list in the body is left alone),
+  including a ``3.5. Traceability`` line set directly above its paragraph;
 - puts unnumbered headings one level below the section they sit in.
 
 A document with no section numbering is left unchanged by
@@ -37,6 +38,7 @@ _NAMED = re.compile(
     re.IGNORECASE)
 MIN_NUMBERED = 3   # fewer numbered headings than this: no scheme to normalize
 MAX_TITLE_WORDS = 15
+MIN_PARAGRAPH_WORDS = 8  # a title run into its text needs a real paragraph below
 
 
 def _plain(line: str) -> tuple[int, str]:
@@ -89,8 +91,25 @@ def _next_ok(prev: tuple[int, ...] | None, num: tuple[int, ...]) -> bool:
     return k == len(prev) + 1 and num[:-1] == prev and num[-1] in (1, 2)
 
 
+def _runs_into_paragraph(lines: list[str], i: int) -> bool:
+    """Is line ``i`` a multi-level numbered title with its paragraph directly
+    below (``3.5. Traceability`` then the body, no blank line between)?
+
+    One-level numbers are too often list items, and a contents page lists
+    numbered entries one after another, so both are left alone.
+    """
+    m = _DECIMAL.fullmatch(_plain(lines[i])[1])
+    if not m or "." not in m.group(1) or i + 1 >= len(lines):
+        return False
+    below = lines[i + 1].strip()
+    return (len(below.split()) >= MIN_PARAGRAPH_WORDS
+            and below[:1] not in ("|", ">", "-", "!", "<", "#")
+            and _parse(_plain(below)[1]) is None)
+
+
 def _blocks(lines: list[str]) -> list[int]:
-    """Indexes of standalone lines: blank (or a page marker) on both sides, outside code."""
+    """Indexes of standalone lines (blank or a page marker on both sides, outside
+    code) and of numbered titles run into their paragraph."""
     blank = [not ln.strip() or is_page_marker_line(ln.strip()) for ln in lines]
     out, fenced = [], False
     for i, ln in enumerate(lines):
@@ -101,7 +120,7 @@ def _blocks(lines: list[str]) -> list[int]:
             continue
         before = i == 0 or blank[i - 1]
         after = i == len(lines) - 1 or blank[i + 1]
-        if before and after or _HEADING.fullmatch(ln.strip()):
+        if before and (after or _runs_into_paragraph(lines, i)) or _HEADING.fullmatch(ln.strip()):
             out.append(i)
     return out
 
