@@ -164,7 +164,7 @@ def test_cleanup_drops_placeholders_no_crop_took():
 
 def _fake_vlm_ocr(markdown: str, events: list | None = None):
     def fake(pdf_path, settings, *, preserve_pages=False, cache_dir=None, stop=None,
-             keep_cache=False):
+             keep_cache=False, stem=None):
         assert preserve_pages, "figure extraction needs page markers"
         assert keep_cache, "the page cache must outlive figure work"
         return OcrResult(markdown=markdown, page_markdowns=["", "", ""],

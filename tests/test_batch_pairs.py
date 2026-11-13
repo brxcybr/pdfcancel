@@ -44,3 +44,45 @@ def test_convert_batch_all_success(monkeypatch, tmp_path):
 
     pairs = convert_mod.convert_batch(pdfs, Settings(), output_dir=tmp_path)
     assert [out for _, out in pairs] == [tmp_path / "one.md", tmp_path / "two.md"]
+
+
+# ── output names: same-named PDFs in different folders ───────────────────────
+
+def _pdf(path: Path, data: bytes) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return path
+
+
+def test_output_stems_keep_unique_names(tmp_path):
+    pdfs = [_pdf(tmp_path / "a" / "one.pdf", b"1"), _pdf(tmp_path / "b" / "two.pdf", b"2")]
+    assert convert_mod.output_stems(pdfs) == {pdfs[0]: "one", pdfs[1]: "two"}
+
+
+def test_output_stems_separate_different_pdfs_with_one_name(tmp_path):
+    first = _pdf(tmp_path / "academic" / "Moller 2020.pdf", b"paper")
+    other = _pdf(tmp_path / "doctrine" / "Moller 2020.pdf", b"another document")
+    copy = _pdf(tmp_path / "archive" / "Moller 2020.pdf", b"paper")  # identical bytes
+    stems = convert_mod.output_stems([first, copy, other])
+    assert stems[first] == "Moller 2020"
+    assert stems[copy] == "Moller 2020"  # same document: skipped as unchanged
+    assert stems[other] == "Moller 2020 (doctrine)"
+
+
+def test_output_stems_fall_back_to_a_hash_when_the_folder_name_is_taken(tmp_path):
+    a = _pdf(tmp_path / "x" / "r.pdf", b"a")
+    b = _pdf(tmp_path / "y" / "lib" / "r.pdf", b"b")
+    c = _pdf(tmp_path / "z" / "lib" / "r.pdf", b"c")
+    stems = convert_mod.output_stems([a, b, c])
+    assert stems[b] == "r (lib)"
+    assert stems[c].startswith("r (") and stems[c] not in ("r", "r (lib)")
+
+
+def test_convert_batch_writes_same_named_pdfs_separately(monkeypatch, tmp_path):
+    pdfs = [_pdf(tmp_path / "a" / "same.pdf", b"1"), _pdf(tmp_path / "b" / "same.pdf", b"2")]
+    monkeypatch.setattr(
+        convert_mod, "convert_single",
+        lambda pdf_path, settings, *, output_dir, output_stem, **kw: output_dir / f"{output_stem}.md",
+    )
+    pairs = convert_mod.convert_batch(pdfs, Settings(), output_dir=tmp_path / "out")
+    assert [out.name for _, out in pairs] == ["same.md", "same (b).md"]
