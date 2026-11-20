@@ -521,6 +521,17 @@ pdfcancel/
 - [x] Structured data table extraction from chart images
 - [x] Local figure extraction + `--full` on the `vlm` engine (self-hosted, end-to-end)
 
+## Documentation
+
+- **CLI Help**: Run `pdfcancel --help` for command overview and `pdfcancel backlog --help` for detailed backlog options.
+- **Man Page**: A comprehensive man page is available at `man/man1/pdfcancel.1`. To install it system-wide:
+  ```bash
+  make install-man
+  # Then view with:
+  man pdfcancel
+  ```
+- **Skill Documentation**: See [skills/pdfcancel/SKILL.md](skills/pdfcancel/SKILL.md) for Codex skill integration.
+
 ## License
 
 MIT

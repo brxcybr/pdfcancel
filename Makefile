@@ -9,7 +9,7 @@ PIP := $(VENV)/bin/python3.12 -m pip  # not bin/pip: its shebang breaks if the v
 PYTHON := $(VENV)/bin/python3.12
 PDFCANCEL := $(VENV)/bin/pdfcancel
 
-.PHONY: install test clean help
+.PHONY: install test clean help man install-man
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
@@ -17,6 +17,16 @@ help: ## Show this help
 
 install: ## Install/reinstall pdfcancel into the venv
 	$(PIP) install --quiet .
+
+man:
+	@mkdir -p man/man1
+	@touch man/man1/pdfcancel.1
+
+install-man: man ## Install manpage to system
+	@echo "Installing manpage to /usr/local/share/man/man1/"
+	@sudo mkdir -p /usr/local/share/man/man1
+	@sudo cp man/man1/pdfcancel.1 /usr/local/share/man/man1/
+	@echo "Manpage installed. Run 'man pdfcancel' to view."
 
 dev-install: ## Install with dev dependencies
 	$(PIP) install --quiet ".[dev]"

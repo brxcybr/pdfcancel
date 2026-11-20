@@ -1,0 +1,423 @@
+.TH PDFCANCEL 1 "November 2026" "pdfcancel 1.0" "User Commands"
+.SH NAME
+pdfcancel \- Convert PDF documents to clean markdown using AI-powered OCR
+.SH SYNOPSIS
+.B pdfcancel
+[\fIOPTION\fR]... [\fICOMMAND\fR] [\fIARGS\fR...]
+
+.B pdfcancel
+[\fIOPTION\fR]... \fIPDF_FILE\fR
+
+.B pdfcancel backlog
+[\fIOPTION\fR]... \fIDIRECTORY\fR
+
+.SH DESCRIPTION
+.B pdfcancel
+is a command-line tool that converts PDF documents to clean, readable
+markdown format using AI-powered Optical Character Recognition (OCR).
+It supports both Mistral AI's native OCR service and any OpenAI-compatible
+vision model, making it versatile for cloud-based or local/self-hosted
+OCR workflows.
+
+The tool excels at handling complex PDFs including those with:
+.IP "\fB\-\fR" 4
+Scanned documents
+.IP "\fB\-\fR" 4
+Multi-column layouts
+.IP "\fB\-\fR" 4
+Tables and figures
+.IP "\fB\-\fR" 4
+Mathematical notation
+.IP "\fB\-\fR" 4
+Images and diagrams (with --full)
+
+.SH OCR ENGINES
+.TP
+.B mistral (default)
+Uses Mistral AI's native OCR API (model: mistral-ocr-latest).
+Requires the MISTRAL_API_KEY environment variable.
+Best for general-purpose PDF conversion with high accuracy.
+
+.TP
+.B vlm
+Uses any OpenAI-compatible vision model via the /v1/chat/completions
+endpoint. Supports local inference with Ollama, vLLM, LiteLLM, or any
+OpenAI-compatible server. Activate with --ocr-engine vlm or by setting
+--api-base.
+
+.SH COMMON OPTIONS
+For the default convert command (applied to single PDFs or when invoked
+directly with a PDF path):
+
+.TP
+.B \-o, \-\-output \fIPATH\fR
+Output directory for converted files. Default: same directory as input PDF.
+
+.TP
+.B \-\-images
+Extract figures and images from the PDF to a companion directory named
+<input>_images/. Images are referenced in the markdown output.
+
+.TP
+.B \-\-embed-images
+Embed all images as base64-encoded data URIs directly in the markdown
+output instead of using external file references.
+
+.TP
+.B \-\-plaintext
+Output plain text instead of markdown. Disables all markdown formatting.
+
+.TP
+.B \-\-full
+Full multimodal conversion. In addition to text extraction, AI-describes
+all charts, figures, diagrams, and images using a vision model.
+Requires a vision-capable model. Implies --images.
+
+.TP
+.B \-\-full-model \fIMODEL\fR
+Vision model to use for --full image descriptions. Default:
+pixtral-large-latest. For vlm engine: any vision model supported by your
+endpoint (e.g., llava, gemma-4-vision). For mistral engine: multimodal
+model name.
+
+.TP
+.B \-\-ocr-engine \fIENGINE\fR
+OCR engine to use: 'mistral' (default) or 'vlm'.
+
+.TP
+.B \-\-api-base \fIURL\fR
+OpenAI-compatible server URL for vlm engine. Examples:
+http://localhost:11434 (Ollama), http://localhost:8000/v1 (vLLM).
+Implicitly sets --ocr-engine to vlm.
+
+.TP
+.B \-\-api-key \fIKEY\fR
+Bearer token for vlm endpoint authentication. Not needed for local
+Ollama. Overrides PDFCANCEL_API_KEY environment variable.
+
+.TP
+.B \-\-ca-bundle \fIPATH\fR
+CA bundle (PEM file) to verify self-hosted server's TLS certificate.
+Required for HTTPS endpoints with self-signed certificates.
+
+.TP
+.B \-\-model \fIMODEL\fR
+Model override for the active engine. For mistral: OCR model name.
+For vlm: vision model for text extraction.
+
+.TP
+.B \-\-ocr-dpi \fIDPI\fR
+VLM engine only: Resolution in DPI for rasterizing page images.
+Default: 200. Range: 72-600 recommended.
+
+.TP
+.B \-\-ocr-concurrency \fINUM\fR
+VLM engine only: Number of concurrent page requests. Default: 8.
+
+.TP
+.B \-\-ocr-retries \fINUM\fR
+VLM engine only: Retry attempts for failed requests. Default: 5.
+
+.TP
+.B \-\-ocr-timeout \fISECONDS\fR
+VLM engine only: Request timeout in seconds. Default: 180 (3 minutes).
+
+.TP
+.B \-\-caffeinate
+macOS only: Prevent system sleep during conversion. Useful for long
+running batch conversions on laptops.
+
+.TP
+.B \-\-enhance \fIPATH\fR
+Enhance an existing markdown file instead of converting a PDF.
+
+.TP
+.B \-\-chunks
+Also produce chunked JSONL output. Each line is a JSON object with
+text chunk and metadata. Required for search indexing.
+
+.TP
+.B \-\-chunk-size \fINUM\fR
+Maximum tokens per chunk. Default: 1024.
+
+.TP
+.B \-\-chunker \fITYPE\fR
+Chunking strategy: 'recursive' (default), 'semantic', 'sentence',
+or 'hierarchical'.
+
+.TP
+.B \-\-index \fINAME\fR
+Add the converted document to a named search index. Creates or appends
+to the index database. Implies --chunks.
+
+.TP
+.B \-\-index-path \fIPATH\fR
+Custom filesystem path for the search index database.
+
+.TP
+.B \-\-no-clean
+Skip post-OCR cleanup passes. Produces raw OCR output without fixing
+common issues like repeated headers/footers, page numbers, hyphenated
+line breaks. Faster but less polished.
+
+.TP
+.B \-\-preserve-pages
+Inject page markers into chunks so each chunk carries page_start and
+page_end metadata. Required for page-level citations when using --index.
+
+.TP
+.B \-\-force
+Force re-processing even if output file already exists.
+
+.TP
+.B \-\-verbose
+Show detailed progress information including per-page status, API
+requests, and timing.
+
+.TP
+.B \-\-batch
+Use Mistral Batch API for OCR (50% cost savings on directory runs).
+Only available with mistral engine.
+
+.TP
+.B \-\-exclude \fIPATTERN\fR
+Exclude PDFs whose filename contains PATTERN. Can be repeated.
+
+.SH BACKLOG COMMAND
+The backlog command provides resumable batch PDF conversion:
+
+.B pdfcancel backlog [OPTIONS] DIRECTORY
+
+.TP
+.B \-o, \-\-output \fIPATH\fR
+Output directory for all converted files. Default: each PDF converted
+alongside its source.
+
+.TP
+.B \-\-exclude \fIPATTERN\fR
+Exclude PDFs matching pattern. Repeatable.
+
+.TP
+.B \-\-force
+Force re-processing all PDFs even if already converted.
+
+.TP
+.B \-\-caffeinate
+Prevent macOS system sleep during conversion.
+
+The backlog command supports all VLM and mistral engine options described
+above. It is checkpointed and signal-safe: Ctrl-C stops cleanly and
+re-running resumes from where it left off.
+
+ progress is tracked in <directory>/.pdfcancel_run.json and can be viewed
+with:
+
+.B pdfcancel status DIRECTORY
+
+.SH SEARCH AND INDEXING
+.pdfcancel supports creating searchable indexes of your document collection:
+
+.TP
+.B Create index
+pdfcancel paper.pdf --index my_index
+pdfcancel ./documents/ --index research
+
+.TP
+.B List indexes
+pdfcancel indexes
+
+.TP
+.B Search
+pdfcancel search my_index "query text"
+pdfcancel search research "machine learning" --top-k 10
+pdfcancel search cti "threat intelligence" --mode semantic --context
+
+.TP
+Search modes:
+.IP "\fBhybrid\fR" 4
+Combine keyword and semantic search (default)
+.IP "\fBsemantic\fR" 4
+Pure embedding-based search for meaning
+.IP "\fBtext\fR" 4
+Traditional keyword search only
+
+.TP
+Search options:
+.IP "\fB\-k, \-\-top-k \fIN\fR" 4
+Number of results (default: 10)
+.IP "\fB\-\-context\fR" 4
+Include neighboring chunks for more context
+.IP "\fB\-\-index-path \fIPATH\fR" 4
+Custom path for index database
+
+.SH COMMAND REFERENCE
+.TP
+.B pdfcancel [PDF_FILE] [OPTIONS]
+Convert a single PDF file to markdown.
+
+.TP
+.B pdfcancel backlog DIRECTORY [OPTIONS]
+Resumable batch conversion of all PDFs in a directory.
+
+.TP
+.B pdfcancel status DIRECTORY
+Show progress of a backlog run.
+
+.TP
+.B pdfcancel indexes
+List all search indexes and their contents.
+
+.TP
+.B pdfcancel search INDEX_NAME "QUERY" [OPTIONS]
+Search across indexed documents.
+
+.TP
+.B pdfcancel zotero [OPTIONS]
+Zotero library integration (requires plugin).
+
+.SH ENVIRONMENT VARIABLES
+.TP
+.B MISTRAL_API_KEY
+API key for Mistral's OCR service. Required when using mistral engine.
+
+.TP
+.B PDFCANCEL_API_BASE
+Default API base URL for vlm engine. Override with --api-base.
+
+.TP
+.B PDFCANCEL_API_KEY
+API key for vlm endpoint. Override with --api-key.
+
+.TP
+.B PDFCANCEL_OCR_ENGINE
+Default OCR engine: 'mistral' or 'vlm'. Override with --ocr-engine.
+
+.TP
+.B PDFCANCEL_OCR_MODEL
+Default OCR model for mistral engine. Override with --model.
+
+.TP
+.B PDFCANCEL_VLM_MODEL
+Default vision model for vlm engine. Override with --model.
+
+.TP
+.B PDFCANCEL_MULTIMODAL_MODEL
+Default vision model for --full image descriptions.
+
+.TP
+.B MISTRAL_BASE_URL
+Mistral-compatible server URL. Override with --mistral-url.
+
+.TP
+.B MISTRAL_CA_BUNDLE
+CA bundle (PEM) for verifying self-signed certificates.
+Override with --ca-bundle or --mistral-ca-bundle.
+
+.TP
+.B PDFCANCEL_CA_BUNDLE
+Same as MISTRAL_CA_BUNDLE (preferred for vlm engine).
+
+.SH EXAMPLES
+.TP
+.B Basic conversion
+pdfcancel document.pdf
+
+.TP
+.B Convert with custom output
+pdfcancel document.pdf -o ./markdown/
+
+.TP
+.B Full multimodal (text + image descriptions)
+pdfcancel report.pdf --full
+
+.TP
+.B Use local Ollama
+pdfcancel paper.pdf --api-base http://localhost:11434
+
+.TP
+.B Use vlm engine with specific model
+pdfcancel paper.pdf --ocr-engine vlm --model llava:13b
+
+.TP
+.B Batch convert directory
+pdfcancel backlog ./papers/
+
+.TP
+.B Batch with resumable progress
+pdfcancel backlog ./papers/ --ocr-engine vlm --api-base http://localhost:11434
+# Ctrl-C to interrupt
+pdfcancel backlog ./papers/  # Resumes from checkpoint
+
+.TP
+.B Check progress
+pdfcancel status ./papers/
+
+.TP
+.B Create and search index
+pdfcancel ./docs/ --index research
+pdfcancel search research "climate change"
+
+.TP
+.B Extract images
+pdfcancel report.pdf --images
+
+.TP
+.B Embed images in markdown
+pdfcancel slides.pdf --images --embed-images
+
+.TP
+.B Plain text output
+pdfcancel document.pdf --plaintext
+
+.TP
+.B High quality for complex PDFs
+pdfcancel complex.pdf --ocr-dpi 300 --no-clean
+
+.TP
+.B Exclude certain files
+pdfcancel backlog ./all/ --exclude draft --exclude temp
+
+.TP
+.B Verbose output for debugging
+pdfcancel document.pdf --verbose
+
+.TP
+.B Custom endpoint with API key
+pdfcancel paper.pdf --api-base https://custom.endpoint/v1 --api-key sk-...
+
+.SH EXIT STATUS
+.TP
+.B 0
+Success
+.TP
+.B 1
+Errors occurred during conversion
+.TP
+.B 2
+Conversion incomplete or interrupted
+
+.SH NOTES
+For best results with the mistral engine, ensure you have a valid
+MISTRAL_API_KEY set in your environment.
+
+For local inference with the vlm engine, you'll need a running
+OpenAI-compatible server (Ollama, vLLM, LiteLLM, etc.) and the
+--api-base flag pointing to it.
+
+The --full flag requires a vision-capable model. Not all OCR models
+support image description.
+
+.SH BUGS
+Report bugs at: https://github.com/brxcybr/pdfcancel/issues
+
+.SH AUTHOR
+Written by Blane Richoux and contributors.
+
+.SH COPYRIGHT
+Copyright (C) 2026. Free use of this software is granted under the
+terms of the MIT License.
+
+.SH SEE ALSO
+.BR pdfcancel(1),
+.BR curl(1),
+.BR jq(1)

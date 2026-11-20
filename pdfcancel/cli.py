@@ -105,7 +105,12 @@ class DefaultGroup(click.Group):
         return super().parse_args(ctx, args)
 
 
-@click.group(cls=DefaultGroup, invoke_without_command=True)
+@click.group(
+    cls=DefaultGroup,
+    invoke_without_command=True,
+    help="Convert PDFs to clean markdown using AI-powered OCR. "
+         "Supports Mistral API and OpenAI-compatible vision models."
+)
 @click.option("--version", is_flag=True, is_eager=True, expose_value=False,
               callback=lambda ctx, param, val: (
                   click.echo(f"pdfcancel {__version__}") or ctx.exit()
@@ -113,7 +118,44 @@ class DefaultGroup(click.Group):
               help="Show version and exit.")
 @click.pass_context
 def main(ctx):
-    """Cancel your PDFs — convert them to clean markdown."""
+    """Cancel your PDFs — convert them to clean markdown.
+    
+    PDFCANCEL is a powerful PDF to markdown converter that uses AI-powered OCR
+    to extract text, tables, and figures from PDF documents, producing clean,
+    readable markdown output.
+    
+    The tool supports two OCR engines:
+    
+    \b
+    MISTRAL ENGINE (default):
+      Uses Mistral AI's native OCR API (mistral-ocr-latest). Best for general
+      purpose PDF conversion. Requires MISTRAL_API_KEY environment variable
+      or --mistral-url for custom endpoints.
+    
+    \b
+    VLM ENGINE:
+      Uses any OpenAI-compatible vision model via /v1/chat/completions.
+      Allows local/self-hosted models (e.g., Ollama, vLLM, LiteLLM).
+      Activate with --ocr-engine vlm or by setting --api-base.
+    
+    \b
+    Common Workflows:
+      Single PDF:          pdfcancel document.pdf
+      Directory:           pdfcancel backlog ./papers/
+      With indexing:       pdfcancel paper.pdf --index my_index
+      Full multimodal:     pdfcancel paper.pdf --full
+      Custom endpoint:     pdfcancel paper.pdf --api-base http://localhost:11434
+    
+    \b
+    Environment Variables:
+      MISTRAL_API_KEY      API key for Mistral's OCR service
+      PDFCANCEL_API_BASE   Default API base URL for vlm engine
+      PDFCANCEL_API_KEY    API key for vlm endpoint
+      PDFCANCEL_OCR_ENGINE  Default OCR engine (mistral/vlm)
+      MISTRAL_CA_BUNDLE    CA bundle PEM file for self-signed certificates
+    
+    See also: man:pdfcancel(1) for detailed documentation.
+    """
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -131,70 +173,123 @@ except ImportError:
 @main.command(hidden=True)
 @click.argument("path", type=click.Path(exists=True))
 @click.option("-o", "--output", "output_dir", type=click.Path(), default=None,
-              help="Output directory (default: same as input).")
-@click.option("--images", is_flag=True, help="Extract images to companion directory.")
-@click.option("--embed-images", is_flag=True, help="Embed images as base64 in markdown.")
-@click.option("--plaintext", is_flag=True, help="Output plaintext instead of markdown.")
+              help="Output directory for converted files. "
+                   "Default: same directory as input PDF.")
+@click.option("--images", is_flag=True,
+              help="Extract figures and images from the PDF to a companion "
+                   "directory named <input>_images/. Images are referenced in the "
+                   "markdown output.")
+@click.option("--embed-images", is_flag=True,
+              help="Embed all images as base64-encoded data URIs directly in the "
+                   "markdown output instead of using external file references.")
+@click.option("--plaintext", is_flag=True,
+              help="Output plain text instead of markdown. Disables markdown "
+                   "formatting, useful for simple text extraction.")
 @click.option("--full", is_flag=True,
-              help="Full multimodal: AI-describe charts, figures, and diagrams.")
+              help="Full multimodal conversion. In addition to text extraction, "
+                   "AI-describes all charts, figures, diagrams, and images using a "
+                   "vision model. Requires a vision-capable model. Implies --images.")
 @click.option("--full-model", default=None,
-              help="Vision model for --full (default: pixtral-large-latest).")
+              help="Vision model to use for --full image descriptions. "
+                   "Default: pixtral-large-latest. For vlm engine: any vision model "
+                   "supported by your endpoint (e.g., llava, gemma-4-vision). "
+                   "For mistral engine: multimodal model name.")
 @click.option("--mistral-url", default=None,
-              help="Custom Mistral-compatible server URL, e.g. a local vLLM "
-                   "instance (overrides MISTRAL_BASE_URL).")
+              help="Custom Mistral-compatible server URL for the mistral OCR engine. "
+                   "Overrides MISTRAL_BASE_URL environment variable. "
+                   "Example: https://api.mistral.ai or http://localhost:11434")
 @click.option("--mistral-ca-bundle", type=click.Path(exists=True), default=None,
-              help="CA bundle (PEM) to verify a self-hosted server's TLS "
-                   "certificate (overrides MISTRAL_CA_BUNDLE). Verification "
-                   "stays enabled.")
+              help="CA bundle (PEM file) to verify the TLS certificate of a "
+                   "self-hosted Mistral server. Overrides MISTRAL_CA_BUNDLE "
+                   "environment variable. TLS verification remains enabled.")
 @click.option("--ocr-engine", type=click.Choice(["mistral", "vlm"]), default=None,
-              help="OCR engine: 'mistral' (/v1/ocr, default) or 'vlm' (any "
-                   "OpenAI-compatible vision model via /v1/chat/completions).")
+              help="OCR engine to use. 'mistral' uses Mistral's native OCR API "
+                   "(default). 'vlm' uses any OpenAI-compatible vision model via "
+                   "/v1/chat/completions endpoint. Auto-switches to 'vlm' when "
+                   "--api-base is specified.")
 @click.option("--api-base", default=None,
-              help="OpenAI-compatible server URL for the vlm engine, e.g. a "
-                   "LiteLLM/vLLM endpoint (sets PDFCANCEL_API_BASE; implies "
-                   "--ocr-engine vlm).")
+              help="OpenAI-compatible server URL for the vlm engine. "
+                   "Examples: http://localhost:11434 (Ollama), "
+                   "https://your-vllm-endpoint.com/v1. "
+                   "Sets PDFCANCEL_API_BASE environment variable for the session. "
+                   "Implicitly sets --ocr-engine to vlm.")
 @click.option("--api-key", default=None,
-              help="Bearer token for the vlm endpoint (default: EMPTY; "
-                   "overrides PDFCANCEL_API_KEY).")
+              help="Bearer token for the vlm endpoint authentication. "
+                   "Default: 'EMPTY' (no authentication). Overrides PDFCANCEL_API_KEY "
+                   "environment variable. Use 'sk-...' for OpenAI, 'ollama' not needed "
+                   "for local Ollama.")
 @click.option("--ca-bundle", type=click.Path(exists=True), default=None,
-              help="CA bundle (PEM) to verify a self-hosted server's TLS cert "
-                   "for either engine (overrides MISTRAL_CA_BUNDLE).")
-@click.option("--ocr-dpi", type=int, default=None,
-              help="vlm engine: page rasterization DPI (default: 200).")
-@click.option("--ocr-concurrency", type=int, default=None,
-              help="vlm engine: concurrent page requests (default: 8).")
-@click.option("--ocr-retries", type=int, default=None,
-              help="vlm engine: network retry attempts per request (default: 5).")
-@click.option("--ocr-timeout", type=float, default=None,
-              help="vlm engine: per-request read/write timeout in seconds "
-                   "(default: 180).")
-@click.option("--caffeinate", is_flag=True,
-              help="macOS: keep the system awake for the run (prevents idle "
-                   "sleep from interrupting a long conversion).")
-@click.option("--enhance", "enhance_md", type=click.Path(exists=True), default=None,
-              help="Enhance an existing markdown file.")
+              help="CA bundle (PEM file) to verify a self-hosted server's TLS "
+                   "certificate for either engine. Commonly needed for internal/"
+                   "self-signed certificates. Overrides MISTRAL_CA_BUNDLE.")
 @click.option("--model", default=None,
-              help="Model override for the active engine (mistral OCR model, "
-                   "or the vlm model).")
-@click.option("--chunks", is_flag=True, help="Also produce chunked JSONL output.")
+              help="Model override for the active OCR engine. "
+                   "For mistral engine: OCR model name (default: mistral-ocr-latest). "
+                   "For vlm engine: vision model for text extraction "
+                   "(default: google/gemma-4-31B-it).")
+@click.option("--ocr-dpi", type=int, default=None,
+              help="VLM engine only: Resolution in DPI for rasterizing page images. "
+                   "Higher values produce better OCR quality but are slower. "
+                   "Default: 200. Recommended: 150-300.")
+@click.option("--ocr-concurrency", type=int, default=None,
+              help="VLM engine only: Number of concurrent page requests to send. "
+                   "Increases throughput but requires more API quota. "
+                   "Default: 8. Adjust based on your endpoint rate limits.")
+@click.option("--ocr-retries", type=int, default=None,
+              help="VLM engine only: Number of retry attempts for failed requests. "
+                   "Useful for unstable connections or rate-limited endpoints. "
+                   "Default: 5.")
+@click.option("--ocr-timeout", type=float, default=None,
+              help="VLM engine only: Request timeout in seconds for read/write "
+                   "operations. Default: 180 (3 minutes). Increase for slow endpoints.")
+@click.option("--caffeinate", is_flag=True,
+              help="macOS only: Prevents system sleep during conversion. "
+                   "Useful for long-running batch conversions on laptops.")
+@click.option("--enhance", "enhance_md", type=click.Path(exists=True), default=None,
+              help="Enhance an existing markdown file instead of converting a PDF. "
+                   "Useful for improving previously converted documents.")
+@click.option("--chunks", is_flag=True,
+              help="Also produce chunked JSONL output alongside the markdown. "
+                   "Each line is a JSON object with text chunk and metadata. "
+                   "Required for search indexing.")
 @click.option("--chunk-size", type=int, default=1024,
-              help="Max tokens per chunk (default: 1024).")
+              help="Maximum tokens per chunk when using --chunks. "
+                   "Default: 1024. Larger values = fewer chunks, less granularity.")
 @click.option("--chunker", type=click.Choice(["recursive", "semantic", "sentence", "hierarchical"]),
-              default="recursive", help="Chunking strategy (default: recursive).")
+              default="recursive",
+              help="Chunking strategy for --chunks. 'recursive': split on sentences "
+                   "and paragraphs. 'semantic': use sentence embeddings for splitting. "
+                   "'sentence': one chunk per sentence. 'hierarchical': preserve document "
+                   "structure. Default: recursive.")
 @click.option("--index", "index_name", default=None,
-              help="Add to a named search index (implies --chunks).")
+              help="Add the converted document to a named search index. "
+                   "Creates or appends to the index database. Implies --chunks. "
+                   "Use 'pdfcancel indexes' to list existing indexes and 'pdfcancel "
+                   "search <index> <query>' to search.")
 @click.option("--index-path", type=click.Path(), default=None,
-              help="Custom path for the index database (e.g. ./cti.db).")
-@click.option("--no-clean", is_flag=True, help="Skip post-OCR cleanup.")
+              help="Custom filesystem path for the search index database. "
+                   "Default: ~/.local/share/pdfcancel/indexes/<index_name>.db")
+@click.option("--no-clean", is_flag=True,
+              help="Skip post-OCR cleanup passes. Produces raw OCR output without "
+                   "fixing common issues like: repeated headers/footers, "
+                   "page numbers, hyphenated line breaks, etc. Faster but less clean.")
 @click.option("--preserve-pages", is_flag=True,
-              help="Inject page markers so chunks carry page_start/page_end "
-                   "metadata for page-level citations.")
-@click.option("--force", is_flag=True, help="Re-process even if already converted.")
-@click.option("--verbose", is_flag=True, help="Show detailed progress.")
+              help="Inject page markers into chunks so each chunk carries page_start "
+                   "and page_end metadata. Required for page-level citations when "
+                   "using --index and --chunks. Essential for legal/academic documents.")
+@click.option("--force", is_flag=True,
+              help="Force re-processing even if the output file already exists. "
+                   "Useful when you need to regenerate with different options.")
+@click.option("--verbose", is_flag=True,
+              help="Show detailed progress information including per-page status, "
+                   "API requests, and timing. Useful for debugging.")
 @click.option("--batch", is_flag=True,
-              help="Use Mistral Batch API for 50%% cost savings on directory runs.")
+              help="Use Mistral Batch API for OCR (50%% cost savings on directory runs). "
+                   "Uploads all pages at once for batch processing. "
+                   "Only available with mistral engine and Mistral Batch API support.")
 @click.option("--exclude", multiple=True,
-              help="Exclude PDFs whose filename contains this text (repeatable).")
+              help="Exclude PDFs whose filename contains this text. Repeatable. "
+                   "Example: --exclude draft --exclude temp. Case-sensitive.")
 def cancel(
     path, output_dir, images, embed_images, plaintext, full, full_model,
     mistral_url, mistral_ca_bundle, ocr_engine, api_base, api_key, ca_bundle,
@@ -204,14 +299,60 @@ def cancel(
     batch, exclude,
 ):
     """Cancel PDFs — convert to clean markdown.
-
+    
+    Converts PDF files to clean, readable markdown format using AI-powered OCR.
+    Supports both Mistral's native OCR API and OpenAI-compatible vision models.
+    
     \b
-    Examples:
-      pdfcancel paper.pdf                       # → paper.md
-      pdfcancel ./papers/                       # cancel all PDFs in dir
-      pdfcancel paper.pdf --full                # AI-describe all figures
-      pdfcancel paper.pdf --index cti           # cancel + index for search
-      pdfcancel paper.pdf --enhance old.md      # upgrade existing markdown
+    BASIC USAGE:
+      pdfcancel document.pdf                     Convert single PDF → document.md
+      pdfcancel ./papers/                        Convert all PDFs in a directory
+      pdfcancel paper.pdf -o output/             Specify output directory
+    
+    \b
+    MISTRAL ENGINE (default):
+      Uses Mistral AI's native OCR (mistral-ocr-latest). Requires MISTRAL_API_KEY.
+      
+      pdfcancel paper.pdf                        # Uses Mistral's API
+      MISTRAL_API_KEY=your_key pdfcancel paper.pdf
+    
+    \b
+    VLM ENGINE (local/self-hosted):
+      Uses any OpenAI-compatible vision model. Perfect for local inference.
+      
+      pdfcancel paper.pdf --api-base http://localhost:11434  # Ollama
+      pdfcancel paper.pdf --ocr-engine vlm --model llava:13b
+    
+    \b
+    FULL MULTIMODAL:
+      Extract text + AI-describe all figures, charts, and diagrams.
+      
+      pdfcancel paper.pdf --full                 # AI describes all images
+      pdfcancel paper.pdf --full --full-model llava:13b
+    
+    \b
+    SEARCH & INDEXING:
+      Create searchable indexes for your document collection.
+      
+      pdfcancel paper.pdf --index research       # Add to 'research' index
+      pdfcancel ./docs/ --index docs --chunks    # Index all docs with chunks
+      pdfcancel search research "machine learning"  # Search the index
+    
+    \b
+    BATCH PROCESSING:
+      Process multiple PDFs with resumable progress and checkpointing.
+      
+      pdfcancel backlog ./papers/                # Resumable directory conversion
+      pdfcancel status ./papers/                 # Check progress
+      pdfcancel backlog ./papers/ --force        # Re-process everything
+    
+    \b
+    ADVANCED OPTIONS:
+      pdfcancel paper.pdf --images --embed-images    # Extract & embed images
+      pdfcancel paper.pdf --plaintext              # Output as plain text
+      pdfcancel paper.pdf --no-clean               # Skip post-processing cleanup
+      pdfcancel paper.pdf --ocr-dpi 300            # Higher quality for complex PDFs
+      pdfcancel paper.pdf --exclude draft         # Skip files matching pattern
     """
     input_path = Path(path)
     _maybe_reexec_caffeinate(caffeinate)
@@ -395,24 +536,57 @@ def _index_file(
 
 # ── Search command ─────────────────────────────────────────────────────────
 
-@main.command()
+@main.command(help="Search across previously indexed documents. "
+               "Supports hybrid, semantic, and text search modes.")
 @click.argument("index_name")
 @click.argument("query")
-@click.option("-k", "--top-k", type=int, default=10, help="Number of results (default: 10).")
+@click.option("-k", "--top-k", type=int, default=10,
+              help="Number of search results to return. Default: 10. "
+                   "Higher values return more matches but may be slower.")
 @click.option("--mode", type=click.Choice(["hybrid", "semantic", "text"]),
-              default="hybrid", help="Search mode (default: hybrid).")
+              default="hybrid",
+              help="Search mode. 'hybrid': combine keyword and semantic search (default). "
+                   "'semantic': pure embedding-based search for meaning. "
+                   "'text': traditional keyword search only.")
 @click.option("--context", is_flag=True,
-              help="Include neighboring chunks for more context.")
+              help="Include neighboring chunks before and after each match for more "
+                   "context. Useful for understanding the full passage around a match.")
 @click.option("--index-path", type=click.Path(), default=None,
-              help="Custom path for the index database.")
+              help="Custom filesystem path for the index database. "
+                   "Default: ~/.local/share/pdfcancel/indexes/<index_name>.db")
 def search(index_name, query, top_k, mode, context, index_path):
-    """Search across indexed documents.
-
+    """Search across previously indexed documents.
+    
+    Perform semantic and keyword search across previously indexed PDF documents.
+    Requires documents to be indexed using --index option during conversion.
+    
     \b
-    Examples:
-      pdfcancel search cti "threat intelligence sharing"
-      pdfcancel search cti "ATT&CK" --mode semantic --context
-      pdfcancel search cti "risk management" -k 5
+    BASIC USAGE:
+      pdfcancel search my_index "machine learning"      # Search 'my_index'
+      pdfcancel search research "threat intelligence"   # Search 'research' index
+    
+    \b
+    SEARCH MODES:
+      Hybrid (default): Combines traditional keyword matching with semantic
+                      understanding for best results.
+      Semantic:        Pure meaning-based search using embeddings. Best for
+                      conceptual queries.
+      Text:            Traditional keyword search. Fastest, good for exact matches.
+    
+    \b
+    EXAMPLES:
+      pdfcancel search cti "threat intelligence sharing"  # Basic search
+      pdfcancel search cti "ATT&CK" --mode semantic       # Semantic-only
+      pdfcancel search cti "risk management" -k 5         # Limit to 5 results
+      pdfcancel search cti "APT29" --context              # Show surrounding context
+      pdfcancel search research "climate change" --mode hybrid --top-k 20
+    
+    \b
+    TIPS:
+      - Use quotes for exact phrase matching
+      - Hybrid mode works best for most use cases
+      - Use --context to see the full passage around matches
+      - Combine with --mode semantic for research/academic queries
     """
     from pdfcancel.index import search as do_search, set_index_path
 
@@ -485,9 +659,42 @@ def search(index_name, query, top_k, mode, context, index_path):
 
 # ── Indexes command ───────────────────────────────────────────────────────
 
-@main.command()
+@main.command(help="List all search indexes with their document counts. "
+               "Shows chunk statistics for each indexed source.")
 def indexes():
-    """List all search indexes and their contents."""
+    """List all search indexes with their document counts.
+    
+    Display information about all existing search indexes, including the
+    documents they contain and the number of chunks indexed from each.
+    
+    \b
+    USAGE:
+      pdfcancel indexes                          # List all indexes
+    
+    \b
+    OUTPUT:
+      For each index, shows a table with:
+        - Source: The original document filename
+        - Chunks: Number of text chunks from that document
+        - Total: Summary of total chunks in the index
+    
+    \b
+    EXAMPLE:
+      $ pdfcancel indexes
+      
+      Index: cti
+      ┌─────────────────┬─────────┐
+      │ Source          │  Chunks │
+      │ threat_report.pdf │    150 │
+      │ malware_analysis.md │     85 │
+      │ TOTAL           │   [bold]235[/bold] │
+      └─────────────────┴─────────┘
+      
+    \b
+    RELATED COMMANDS:
+      pdfcancel paper.pdf --index my_index      # Create/index a document
+      pdfcancel search my_index "query"         # Search an index
+    """
     from pdfcancel.index import list_indexes
 
     idx_list = list_indexes()
@@ -509,53 +716,119 @@ def indexes():
 
 # ── Backlog command (resumable directory run) ────────────────────────────
 
-@main.command()
+@main.command(help="Resumable batch PDF conversion for directories. "
+               "Checkpointed, signal-safe, with progress tracking.")
 @click.argument("path", type=click.Path(exists=True, file_okay=False))
 @click.option("-o", "--output", "output_dir", type=click.Path(), default=None,
-              help="Output directory (default: alongside each PDF).")
+              help="Output directory for all converted files. "
+                   "Default: each PDF is converted alongside its source file.")
 @click.option("--exclude", multiple=True,
-              help="Exclude PDFs whose filename contains this text (repeatable).")
+              help="Exclude PDFs whose filename contains this text. Can be repeated. "
+                   "Example: --exclude draft --exclude temp skips files with "
+                   "'draft' or 'temp' in their names.")
 @click.option("--ocr-engine", type=click.Choice(["mistral", "vlm"]), default=None,
-              help="OCR engine (default: mistral, or vlm when --api-base is set).")
+              help="OCR engine to use. 'mistral' (default) uses Mistral's native OCR API. "
+                   "'vlm' uses OpenAI-compatible vision models. Auto-switches to 'vlm' "
+                   "when --api-base is specified.")
 @click.option("--api-base", default=None,
-              help="OpenAI-compatible server URL (implies the vlm engine).")
-@click.option("--api-key", default=None, help="Bearer token for the vlm endpoint.")
+              help="OpenAI-compatible server URL for vlm engine. "
+                   "Examples: http://localhost:11434 (Ollama), "
+                   "http://localhost:8000/v1 (vLLM). Implicitly sets --ocr-engine vlm.")
+@click.option("--api-key", default=None,
+              help="Bearer token for vlm endpoint authentication. "
+                   "Not needed for local Ollama. Overrides PDFCANCEL_API_KEY env var.")
 @click.option("--ca-bundle", type=click.Path(exists=True), default=None,
-              help="CA bundle (PEM) to verify a self-hosted server's TLS cert.")
-@click.option("--model", default=None, help="Model override for the active engine.")
-@click.option("--ocr-dpi", type=int, default=None, help="vlm: page rasterization DPI.")
+              help="CA bundle (PEM file) for verifying self-hosted server TLS certificates. "
+                   "Required for HTTPS endpoints with self-signed certificates.")
+@click.option("--model", default=None,
+              help="Model override for the active engine. "
+                   "For mistral: OCR model (default: mistral-ocr-latest). "
+                   "For vlm: vision model (default: google/gemma-4-31B-it).")
+@click.option("--ocr-dpi", type=int, default=None,
+              help="VLM only: Page rasterization DPI. Higher = better quality but slower. "
+                   "Default: 200. Range: 72-600 recommended.")
 @click.option("--ocr-concurrency", type=int, default=None,
-              help="vlm: concurrent page requests.")
+              help="VLM only: Number of concurrent page requests. "
+                   "Default: 8. Reduce if hitting rate limits.")
 @click.option("--ocr-retries", type=int, default=None,
-              help="vlm: network retry attempts per request.")
+              help="VLM only: Retry attempts for failed requests. "
+                   "Default: 5. Increase for unstable connections.")
 @click.option("--ocr-timeout", type=float, default=None,
-              help="vlm: per-request read/write timeout in seconds.")
-@click.option("--chunks", is_flag=True, help="Also produce chunked JSONL output.")
-@click.option("--chunk-size", type=int, default=1024, help="Max tokens per chunk.")
+              help="VLM only: Request timeout in seconds. "
+                   "Default: 180 (3 minutes). Increase for slow endpoints or large pages.")
+@click.option("--chunks", is_flag=True,
+              help="Also produce chunked JSONL output. Each chunk is a JSON line "
+                   "with text and metadata. Required for search indexing.")
+@click.option("--chunk-size", type=int, default=1024,
+              help="Maximum tokens per chunk. Default: 1024. "
+                   "Larger values create fewer, larger chunks.")
 @click.option("--chunker",
               type=click.Choice(["recursive", "semantic", "sentence", "hierarchical"]),
-              default="recursive", help="Chunking strategy (default: recursive).")
+              default="recursive",
+              help="Chunking strategy. 'recursive': balanced sentence/paragraph splits. "
+                   "'semantic': uses embeddings for content-aware splitting. "
+                   "'sentence': one chunk per sentence (most granular). "
+                   "'hierarchical': preserves document structure. Default: recursive.")
 @click.option("--preserve-pages", is_flag=True,
-              help="Inject page markers for page-level citations.")
-@click.option("--no-clean", is_flag=True, help="Skip post-OCR cleanup.")
-@click.option("--plaintext", is_flag=True, help="Output plaintext instead of markdown.")
-@click.option("--images", is_flag=True, help="Extract figures to <name>_images/.")
+              help="Inject page markers into chunks with page_start/page_end metadata. "
+                   "Essential for legal/academic documents needing page-level citations.")
+@click.option("--no-clean", is_flag=True,
+              help="Skip post-OCR cleanup. Produces raw output without fixing "
+                   "headers/footers, page numbers, hyphenated breaks. Faster but less polished.")
+@click.option("--plaintext", is_flag=True,
+              help="Output plain text instead of markdown. Disables all formatting.")
+@click.option("--images", is_flag=True,
+              help="Extract figures and images to <name>_images/ directories.")
 @click.option("--full", is_flag=True,
-              help="Extract figures and AI-describe charts, figures, and diagrams.")
-@click.option("--full-model", default=None, help="Vision model for --full descriptions.")
-@click.option("--force", is_flag=True, help="Re-process even if already converted.")
+              help="Full multimodal: extract text + AI-describe charts, figures, diagrams. "
+                   "Requires vision model. Implies --images. Adds AI-generated descriptions "
+                   "as alt-text for each figure.")
+@click.option("--full-model", default=None,
+              help="Vision model for --full descriptions. "
+                   "Default: pixtral-large-latest. For vlm: any vision model "
+                   "(llava, gemma-4-vision, etc.).")
+@click.option("--force", is_flag=True,
+              help="Force re-processing of all PDFs, even if already converted. "
+                   "Useful when changing options or after fixing configuration issues.")
 @click.option("--caffeinate", is_flag=True,
-              help="macOS: keep the system awake for the run.")
+              help="macOS only: Prevent system sleep during the run. "
+                   "Recommended for long-running conversions on laptops.")
 def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
             model, ocr_dpi, ocr_concurrency, ocr_retries, ocr_timeout, chunks,
             chunk_size, chunker, preserve_pages, no_clean, plaintext, images,
             full, full_model, force, caffeinate):
-    """Resumably convert every PDF under a directory.
-
-    Checkpointed and signal-safe: already-converted files are skipped, each
-    page is cached as it transcribes, and Ctrl-C (or SIGTERM) stops cleanly so
-    a re-run resumes where it left off. Progress is written to a run-state file
-    that ``pdfcancel status <dir>`` can read.
+    """Resumable batch PDF conversion for directories.
+    
+    Resumable batch PDF conversion with checkpointing. Already-converted files
+    are skipped on subsequent runs. Each page is cached as it transcribes, so
+    Ctrl-C (SIGINT) or SIGTERM stops cleanly and re-running resumes from where
+    it left off.
+    
+    Progress is tracked in a run-state file (<dir>/.pdfcancel_run.json) that
+    can be inspected with: pdfcancel status <dir>
+    
+    \b
+    RESUMABLE WORKFLOW:
+      1. pdfcancel backlog ./papers/           # Start conversion
+      2. Ctrl-C to interrupt at any time       # Stops cleanly
+      3. pdfcancel backlog ./papers/           # Resumes from checkpoint
+      4. pdfcancel status ./papers/            # Check current progress
+    
+    \b
+    EXAMPLES:
+      pdfcancel backlog ./documents/           # Convert all PDFs in directory
+      pdfcancel backlog ./papers/ -o ./markdown/ # Output to different directory
+      pdfcancel backlog ./books/ --full        # Full multimodal conversion
+      pdfcancel backlog ./scans/ --vr-engine vlm --api-base http://localhost:11434
+      pdfcancel backlog ./all/ --exclude draft  # Skip draft files
+      pdfcancel backlog ./corpus/ --index research  # Convert and index for search
+    
+    \b
+    PERFORMANCE TIPS:
+      - Use --ocr-concurrency to match your API rate limits
+      - Increase --ocr-timeout for slow endpoints or large pages
+      - Use --exclude to skip files you don't need
+      - Monitor with --verbose for detailed progress
     """
     _maybe_reexec_caffeinate(caffeinate)
     root = Path(path)
@@ -631,10 +904,61 @@ def backlog(path, output_dir, exclude, ocr_engine, api_base, api_key, ca_bundle,
 
 # ── Status command ────────────────────────────────────────────
 
-@main.command()
+@main.command(help="Show progress of a backlog conversion run. "
+               "Displays detailed statistics for a directory.")
 @click.argument("path", type=click.Path(exists=True, file_okay=False))
 def status(path):
-    """Show the progress of a backlog run under <dir>."""
+    """Show progress of a backlog conversion run."
+    
+    Display the current state of a resumable batch conversion started with
+    'pdfcancel backlog'. Shows which files have been processed, skipped,
+    failed, or remain to be converted.
+    
+    \b
+    USAGE:
+      pdfcancel status ./papers/                 # Check conversion progress
+    
+    \b
+    OUTPUT:
+      Displays a status table with:
+        - State: 'finished' or 'in progress'
+        - Done: Successfully converted files
+        - Skipped: Already existed (no --force)
+        - Incomplete: Partially processed (can resume)
+        - Failed: Error during conversion
+        - Remaining: Files yet to process
+        - Total: Total files in directory
+        - Current: Currently processing file
+        - Elapsed: Time since run started
+        - Updated: Last update timestamp
+    
+    \b
+    RESUMING AFTER INTERRUPTION:
+      1. Start:  pdfcancel backlog ./papers/
+      2. Stop:   Ctrl-C (stops cleanly, checkpoints saved)
+      3. Resume: pdfcancel backlog ./papers/ (continues from checkpoint)
+      4. Check:  pdfcancel status ./papers/ (view progress at any time)
+    
+    \b
+    EXAMPLE:
+      $ pdfcancel backlog ./documents/
+      [Output truncated, Ctrl-C pressed]
+      
+      $ pdfcancel status ./documents/
+      Backlog status — documents
+      ┌──────────────┬───────┐
+      │ Field        │ Value │
+      │ State        │ in progress │
+      │ Done         │ 12    │
+      │ Skipped      │ 2     │
+      │ Incomplete   │ 1     │
+      │ Failed       │ 0     │
+      │ Remaining    │ 5     │
+      │ Total        │ 20    │
+      │ Current      │ report_q2.pdf │
+      │ Elapsed      │ 2h34m │
+      └──────────────┴───────┘
+    """
     state_path = Path(path) / RUN_STATE_NAME
     if not state_path.exists():
         console.print(f"[yellow]No run state found at {state_path}[/yellow]")
